@@ -13,6 +13,25 @@ First, `stratum plan recipe.yaml` - it estimates what each stratum needs on this
 3. `--max-len 512` if your pairs are short. Memory grows with sequence length.
 4. A smaller base. Run `stratum doctor` and use its recommendation. A pipeline proven on 0.6B scales to 4B later by changing one argument.
 
+## "NameError: name 'torch' is not defined"
+
+The libraries pip installed do not work together. transformers refuses to use a PyTorch older than its minimum - transformers 5 needs PyTorch 2.4 or newer - and rather than failing at install time it quietly disables its own PyTorch half. The first import that reaches modelling code then dies with a `NameError` that names neither package and neither version.
+
+`stratum doctor` diagnoses it: the "Library versions" section ends with `these versions work together: yes` or names the mismatch and prints the fix. Every command that loads a model checks the same thing first, so you get five readable lines instead of a twenty-frame traceback.
+
+The fix depends on your machine:
+
+```bash
+pip install -U torch            # where a newer PyTorch exists
+pip install "transformers<5"    # where it does not - keep this torch, older libraries
+```
+
+**On Intel Macs, only the second one works.** PyTorch published no macOS x86_64 build after 2.2.2, so "upgrade torch" is a dead end there - the install is capped to `transformers<5` automatically on that platform for exactly this reason. Doctor knows the difference and only offers the advice that can succeed.
+
+## "The following model_kwargs are not used by the model"
+
+The tokenizer returned something the model has no argument for - `token_type_ids` is the usual culprit, produced by BERT-family tokenizers and rejected by causal models. STRATUM filters generation inputs down to what a causal model accepts (`encode_for_generation` in `stratum/hf_utils.py`), so this should not reach you. If it does with a custom loading path, route your tokenizer output through that helper.
+
 ## My GPU isn't being used
 
 The most common cause is not a missing GPU - it's the CPU-only build of PyTorch sitting in front of a perfectly good one. `stratum doctor` now checks for this: if the NVIDIA driver reports a card that PyTorch cannot see, it prints the fix. The command matters:

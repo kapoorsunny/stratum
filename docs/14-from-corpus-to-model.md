@@ -97,6 +97,25 @@ The industrial behaviors carry over from `teacher-gen`: pairs are written the mo
 
 The same privacy rule as everywhere: `--teacher hf` keeps the corpus on your hardware, while `claude-cli`, `openai`, `anthropic`, and `gemini` send every chunk to that provider. The `claude-cli` backend is worth knowing about: it drives the installed Claude Code CLI, so a strong teacher is available on your existing Claude subscription with no API key to manage.
 
+### Sizing the run
+
+The command prints its plan before it spends anything:
+
+```
+Plan: 200 chunks x 3 pairs = about 600 pairs (540 training, 60 held-out test)
+  Each chunk is one teacher call, so this run makes 200 calls.
+```
+
+Work backwards from the target. Doc 7's table puts a solid skill at 500-1,500
+training pairs, so at 3 pairs per chunk that is roughly 170-500 chunks. A
+corpus of a few thousand chunks therefore does not need every chunk for one
+skill - sample with `--max-chunks` and spend the rest on other skills or a
+second pass.
+
+Rough costs at 200 chunks: a local 4B teacher on one GPU takes tens of
+minutes, an API teacher takes a few minutes and a few dollars. Both scale
+linearly, so measure a 20-chunk run and multiply.
+
 Teacher time is the budget item on a big corpus - thousands of chunks means thousands of teacher calls. `--max-chunks N` caps it by sampling N chunks spread evenly across the file, so every source document contributes rather than whichever file sorts first. Start sampled, check the pair quality, then raise the cap or drop it for the full run.
 
 One pipeline per *skill* is the pattern: run `pairs` more than once with different instructions - one pass for grounded Q&A, one for extraction ("Write pairs that extract equipment IDs, dates, and pressures as JSON"), one for classification - each producing the training file for its own stratum, exactly the layered build from doc 2.

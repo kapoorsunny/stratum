@@ -472,7 +472,9 @@ def main():
                     help="baseline scrub of emails, phone and card numbers - "
                          "not a substitute for your own compliance pipeline")
     ci.add_argument("--chunk-size", type=int, default=2400,
-                    help="target chunk length in characters")
+                    help="target chunk length in characters. 2000-3000 suits "
+                         "most prose - smaller for dense tables, larger when "
+                         "answers span several paragraphs")
     ci.add_argument("--overlap", type=int, default=240,
                     help="characters shared between neighboring chunks")
     ci.set_defaults(func=cmd_corpus_ingest)
@@ -492,17 +494,23 @@ def main():
                          "sends chunks to that provider - use hf for data "
                          "that must not leave")
     cp.add_argument("--model", default=None, help="teacher model id for the chosen backend")
-    cp.add_argument("--per-chunk", type=int, default=3, help="pairs to request per chunk")
+    cp.add_argument("--per-chunk", type=int, default=3,
+                    help="pairs to request per chunk. 2-4 is sensible - more "
+                         "than that and the teacher starts repeating itself")
     cp.add_argument("--max-chunks", type=int, default=None,
                     help="cap teacher cost by sampling this many chunks, spread "
-                         "evenly across the corpus")
+                         "evenly across the corpus. Aim for 500-1500 training "
+                         "pairs per skill (chunks x per-chunk) - doc 7 sizes it")
     cp.add_argument("--test-fraction", type=float, default=0.1,
                     help="fraction of CHUNKS whose pairs go to the test set")
     cp.add_argument("--seed", type=int, default=42, help="makes the train/test split stable")
     cp.set_defaults(func=cmd_corpus_pairs)
 
     tg = sub.add_parser("teacher-gen", help="data distillation: a teacher writes training pairs from seed inputs")
-    tg.add_argument("--seeds", required=True, help="text file, one seed input per line")
+    tg.add_argument("--seeds", required=True,
+                    help="text file, one seed input per line. 500-1500 seeds "
+                         "makes a solid skill, under 50 only proves the "
+                         "pipeline (doc 7)")
     tg.add_argument("--instruction", required=True, help="what the skill should do, one line")
     tg.add_argument("--out", required=True, help="output training JSONL (re-run to resume)")
     tg.add_argument("--teacher", default="hf",

@@ -556,6 +556,19 @@ def generate_pairs(chunks_path: str, instruction: str, teacher_fn,
     if out_test is None and test_fraction > 0:
         raise ValueError("test_fraction is set but no out_test path was given")
 
+    if verbose:
+        expected = len(chunks) * per_chunk
+        train_share = int(expected * (1 - test_fraction))
+        print(f"Plan: {len(chunks)} chunks x {per_chunk} pairs = about "
+              f"{expected} pairs ({train_share} training, "
+              f"{expected - train_share} held-out test)")
+        if train_share < 100:
+            print("  That is a small skill. 500-1,500 training pairs is the "
+                  "usual sweet spot - raise --max-chunks or --per-chunk")
+            print("  for more (doc 7 has the full sizing table).")
+        print(f"  Each chunk is one teacher call, so this run makes "
+              f"{len(chunks)} calls.")
+
     done = set()
     for p in (out_train, out_test):
         if p and Path(p).exists():

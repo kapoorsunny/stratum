@@ -26,6 +26,8 @@
 
 **DARE** - A merge method that randomly drops most of each stratum's small adjustments and rescales the rest, reducing crosstalk when fusing many strata. From Yu et al. (2023). STRATUM seeds the randomness so the same merge always gives the same model.
 
+**Dependency mismatch** - Two installed libraries that cannot work together, most often a transformers newer than the PyTorch beside it. Pip installs them happily and the failure appears much later as an unrelated-looking error. `stratum doctor` checks for it by asking transformers directly.
+
 **Delta** - A stratum's weight adjustment, `scaling x (B @ A)`, added onto a base weight during merging.
 
 **Dial** - These docs' word for a parameter: one adjustable number inside the model, pictured as a volume knob with a current position. Turning a dial means changing that number. Training turns billions of them.

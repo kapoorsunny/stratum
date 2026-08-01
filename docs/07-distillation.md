@@ -182,6 +182,43 @@ loss = alpha * soft + (1 - alpha) * hard
 
 You don't need to memorize this - but now you can read it and explain it. That's the KL-divergence-and-temperature machinery from the original distillation paper - Hinton, Vinyals and Dean, "Distilling the Knowledge in a Neural Network" (2015) - and it's twelve lines.
 
+## How much data does a distilled skill need
+
+The commonest question, and the commonest reason a distilled stratum
+disappoints. These are working numbers, not theory - they come from building
+skills with this tool.
+
+| Pairs | What you get |
+|---|---|
+| under 50 | Proves the pipeline runs. Eval numbers on this much data are noise, and a stratum can collapse outright (doc 6's data check warns about it). |
+| 100-300 | A format or style skill starts to hold - answering as JSON, using your terminology, keeping a house tone. Knowledge-shaped skills are still shaky. |
+| 500-1,500 | The usual sweet spot for one well-scoped skill. Extraction and classification are reliable here, and eval scores start moving predictably when you change something. |
+| 2,000-5,000 | Production quality for most skills, and where distillation earns its cost - enough coverage that the student generalizes rather than memorizes. |
+| 10,000+ | Hard skills, wide input variety, or when you need the model to hold up on inputs nobody anticipated. |
+
+Multiply by the number of skills - a three-skill model at 1,000 pairs each is
+3,000 teacher calls, which is a real budget line against an API teacher and a
+few hours against a local one.
+
+Quality beats quantity, and the gap is not close. Two thousand consistent
+pairs beat twenty thousand sloppy ones, because every inconsistency teaches
+the student that the format is optional. Concretely, from this project's own
+reference build (`examples/energy/`): the same skill, same count of pairs,
+same settings, scored **5.3%** taught by a small local model and **56.4%**
+taught by a strong one. Nothing changed but the teacher.
+
+Three checks worth doing before you spend the compute:
+
+- **Read twenty pairs yourself.** If you would not accept the answer from a
+  colleague, the student is learning to produce it. This catches more problems
+  than any metric.
+- **Watch the response lengths.** Bare values ("32%") make a stratum that
+  learns to stop immediately - answer in short sentences instead ("The share
+  is 32%"). Training prints these statistics before it starts.
+- **Hold out 10-20% before training** (`--test-fraction` does it per chunk),
+  and be suspicious of a skill that scores well on data its teacher also
+  wrote. The teacher's blind spots are in both halves.
+
 ## When to use distillation
 
 - **You have access to a much better model** (an API or a big local one) and want a small deployable model that captures its skill. -> distillation, ideally data distillation first.
