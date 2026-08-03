@@ -123,13 +123,28 @@ stratum teacher-gen --seeds seeds.txt \
 
 Provider model names age quickly - check your provider's current model list and pass `--model` explicitly rather than trusting an example or a built-in default to stay current.
 
-STRATUM asks the teacher for each seed and writes a `{"prompt","response"}` JSONL. Six teacher backends ship: `hf` (a local model - nothing leaves your machine), `claude-cli` (Claude through the installed Claude Code CLI, billed to your existing subscription with no API key), `openai`, `anthropic`, and `gemini` (the respective APIs, each needing its key), and `echo` (a no-op for testing the pipeline).
+STRATUM asks the teacher for each seed and writes a `{"prompt","response"}` JSONL. Seven teacher backends ship: `hf` (a local model - nothing leaves your machine), `llama-cpp` (any local server on the OpenAI dialect, which is how you point at a big quantized model - doc 15), `claude-cli` (Claude through the installed Claude Code CLI, billed to your existing subscription with no API key), `openai`, `anthropic`, and `gemini` (the respective APIs, each needing its key), and `echo` (a no-op for testing the pipeline).
 
 Three details matter when you scale this to thousands of seeds:
 
 - **Each pair is written the moment it exists.** A crash or network drop at seed 4,999 of 5,000 loses one pair, not the run.
 - **Failed calls retry with growing pauses**, and re-running the same command **resumes** - seeds already answered in the output file are skipped. Generating a big dataset against a flaky API is a matter of re-running until it's done.
 - **The teacher's answers arrive clean.** If the teacher is a thinking model (doc 6), its `<think>` reasoning is stripped so your training data contains answers, not deliberation.
+
+### How big a local teacher can you actually run
+
+A teacher is only ever read, never trained, so it needs room for its weights and very little else. In full precision that is roughly 2 GB per billion parameters, which puts an 8B teacher at about 17 GB and out of reach of most laptop GPUs.
+
+Quantizing fixes that, and `--teacher hf` does it for you. Before loading, STRATUM compares the model's size against your actual VRAM and switches to 4-bit when full precision would not fit, printing a line when it does:
+
+```
+Loading Hugging Face teacher: Qwen/Qwen3-8B
+ loading in 4-bit so it fits the GPU
+```
+
+That takes the same 8B teacher to about 5.5 GB, so it runs on an 8 GB card at full GPU speed instead of falling back to the CPU and taking roughly twenty times longer. Quality loss on a read-only model is small, and the alternative is not a better teacher but a much slower one.
+
+Nothing is quantized when it already fits, and nothing is quantized on a machine without an NVIDIA GPU, where `bitsandbytes` does not apply. Run `stratum teachers` first if you want the sizing worked out before you commit to a download.
 
 **Step 3 - train a normal stratum on the distilled data:**
 
