@@ -524,6 +524,48 @@ def _is_test_chunk(chunk_id: str, test_fraction: float, seed: int) -> bool:
     return (int(h[:8], 16) / 0xFFFFFFFF) < test_fraction
 
 
+def default_concurrency(backend: str) -> int:
+    """How many teacher calls to have in flight at once.
+
+    An API teacher spends nearly all of its time waiting for a reply, so
+    running several at once is close to free and turns an overnight job into
+    a lunch break. A local model is the opposite. It is already using the
+    whole GPU for one call, so a second call in parallel wins nothing and
+    can run the card out of memory.
+
+    These are starting points and --concurrency overrides them. Anyone
+    hitting a rate limit should lower it, and the error from the provider
+    will say so plainly.
+    """
+    if backend in ("hf",):
+        return 1
+    if backend in ("claude-cli",):
+        return 4
+    if backend in ("openai", "anthropic", "gemini", "llama-cpp"):
+        return 8
+    return 1
+
+
+def _map_chunks(fn, items, concurrency):
+    """Run fn over items, yielding results as they arrive.
+
+    With concurrency of 1 this is a plain loop and no threads are created at
+    all, which keeps the simple case simple and keeps a local model from
+    paying for machinery it cannot use.
+    """
+    if concurrency <= 1:
+        for item in items:
+            yield fn(item)
+        return
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        pending = {pool.submit(fn, item) for item in items}
+        for fut in as_completed(pending):
+            yield fut.result()
+
+
 def check_pairs_args(chunks_path: str, out_train: str, out_test: str | None,
                      test_fraction: float, per_chunk: int) -> None:
     """Check everything that can be checked without calling a teacher.
@@ -556,7 +598,7 @@ def check_pairs_args(chunks_path: str, out_train: str, out_test: str | None,
 def generate_pairs(chunks_path: str, instruction: str, teacher_fn,
                    out_train: str, out_test: str | None = None,
                    per_chunk: int = 3, test_fraction: float = 0.1,
-                   max_chunks: int | None = None,
+                   max_chunks: int | None = None, concurrency: int = 1,
                    retries: int = 3, seed: int = 42, verbose: bool = True) -> dict:
     """Ask a teacher to write grounded pairs for every chunk.
 
@@ -597,6 +639,9 @@ def generate_pairs(chunks_path: str, instruction: str, teacher_fn,
             print("  for more (doc 7 has the full sizing table).")
         print(f"  Each chunk is one teacher call, so this run makes "
               f"{len(chunks)} calls.")
+        if concurrency > 1:
+            print(f"  Running {concurrency} calls at a time. Lower it with "
+                  f"--concurrency if the provider rate limits you.")
 
     done = set()
     for p in (out_train, out_test):
@@ -613,27 +658,32 @@ def generate_pairs(chunks_path: str, instruction: str, teacher_fn,
 
     counts = {"train_pairs": 0, "test_pairs": 0, "chunks_done": len(done),
               "chunks_failed": 0}
+    todo = [c for c in chunks if c["id"] not in done]
+
+    def answer(chunk):
+        """One chunk, with retries. Runs on a worker thread and touches
+        nothing shared, so the only thing that ever writes is the loop
+        below."""
+        prompt = PAIR_PROMPT.format(n=per_chunk, instruction=instruction,
+                                    source=chunk["source"], chunk=chunk["text"])
+        for attempt in range(retries):
+            try:
+                return chunk, _parse_pairs(teacher_fn(prompt)), None
+            except Exception as e:
+                if attempt + 1 < retries:
+                    time.sleep(2 ** attempt)
+                else:
+                    return chunk, None, e
+        return chunk, None, None
+
     train_f = open(out_train, "a", encoding="utf-8")
     test_f = open(out_test, "a", encoding="utf-8") if out_test else None
     try:
-        for i, chunk in enumerate(chunks, 1):
-            if chunk["id"] in done:
-                continue
-            prompt = PAIR_PROMPT.format(n=per_chunk, instruction=instruction,
-                                        source=chunk["source"], chunk=chunk["text"])
-            pairs = None
-            for attempt in range(retries):
-                try:
-                    pairs = _parse_pairs(teacher_fn(prompt))
-                    break
-                except Exception as e:
-                    wait = 2 ** attempt
-                    if verbose:
-                        print(f" chunk {i}/{len(chunks)}: {e} - retrying in {wait}s "
-                              f"({attempt + 1}/{retries})")
-                    time.sleep(wait)
+        for chunk, pairs, err in _map_chunks(answer, todo, concurrency):
             if pairs is None:
                 counts["chunks_failed"] += 1
+                if verbose and err is not None:
+                    print(f" chunk {chunk['id']} failed after {retries} tries: {err}")
                 continue
 
             to_test = test_fraction > 0 and _is_test_chunk(chunk["id"], test_fraction, seed)
@@ -648,6 +698,7 @@ def generate_pairs(chunks_path: str, instruction: str, teacher_fn,
                     record.update(pair)
                     train_f.write(json.dumps(record, ensure_ascii=False) + "\n")
                     counts["train_pairs"] += 1
+            # Flushed per chunk so a crash costs one chunk, never the run.
             (test_f or train_f).flush()
             train_f.flush()
             counts["chunks_done"] += 1
