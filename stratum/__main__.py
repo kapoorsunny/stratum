@@ -25,6 +25,13 @@ import sys
 from pathlib import Path
 
 
+def cmd_setup(args):
+    from .setup_env import run_setup
+    result = run_setup(dry_run=args.dry_run)
+    if result["failed"]:
+        sys.exit(1)
+
+
 def cmd_doctor(args):
     import torch
     print("STRATUM doctor\n" + "-" * 42)
@@ -271,7 +278,7 @@ def cmd_corpus_ingest(args):
 
 
 def cmd_corpus_pairs(args):
-    from .corpus import generate_pairs, check_pairs_args
+    from .corpus import check_pairs_args, default_concurrency, generate_pairs
     from .teachers import get_teacher
 
     # Loading a teacher can mean a long download, so every argument is
@@ -285,10 +292,13 @@ def cmd_corpus_pairs(args):
     teacher_fn = get_teacher(args.teacher, model=args.model,
                              url=getattr(args, 'teacher_url', None))
     try:
+        concurrency = (args.concurrency if args.concurrency
+                       else default_concurrency(args.teacher))
         generate_pairs(args.chunks, args.instruction, teacher_fn,
                        out_train=args.out, out_test=args.test_out,
                        per_chunk=args.per_chunk, test_fraction=args.test_fraction,
-                       max_chunks=args.max_chunks, seed=args.seed)
+                       max_chunks=args.max_chunks, concurrency=concurrency,
+                       seed=args.seed)
     except (ValueError, FileNotFoundError) as e:
         sys.exit(str(e))
 
@@ -461,6 +471,11 @@ def main():
     d = sub.add_parser("doctor", help="check hardware, recommend model size")
     d.set_defaults(func=cmd_doctor)
 
+    su = sub.add_parser("setup", help="install what this machine is missing")
+    su.add_argument("--dry-run", action="store_true",
+                    help="print the commands and install nothing")
+    su.set_defaults(func=cmd_setup)
+
     t = sub.add_parser("train", help="train one stratum")
     t.add_argument("--skill", required=True)
     t.add_argument("--out", required=True)
@@ -622,6 +637,11 @@ def main():
                          "sends chunks to that provider - use hf for data "
                          "that must not leave")
     cp.add_argument("--model", default=None, help="teacher model id for the chosen backend")
+    cp.add_argument("--concurrency", type=int, default=None,
+                    help="teacher calls to run at once. Defaults to 1 for a "
+                         "local model and several for an API, since an API "
+                         "spends its time waiting. Lower it if you get rate "
+                         "limited")
     cp.add_argument("--per-chunk", type=int, default=3,
                     help="pairs to request per chunk. 2-4 is sensible - more "
                          "than that and the teacher starts repeating itself")
