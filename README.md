@@ -182,6 +182,10 @@ The credit for the underlying methods belongs to their authors:
 - **DARE** - Yu et al., "Language Models are Super Mario: Absorbing Abilities from Homologous Models" (2023)
 - **Distillation** - Hinton, Vinyals and Dean, "Distilling the Knowledge in a Neural Network" (2015)
 - **Tooling** - Hugging Face Transformers and PEFT, the bitsandbytes library, PyTorch, and the Qwen team's open models
+- **GGUF and the block quantization formats** - Georgi Gerganov and the [ggml and llama.cpp](https://github.com/ggml-org/llama.cpp) contributors. The optional C engine reads their format, and `stratum teachers` recommends running big models with their runtime.
+- **The idea behind the C engine** - [kimi-k3-in-c](https://github.com/FareedKhan-dev/kimi-k3-in-c) by Fareed Khan, which runs a 2.78-trillion-parameter model on one CPU in 8.24 GB. Its published measurement of why an expert cache stops helping is what pointed at a different schedule. [engine/README.md](engine/README.md) explains the debt in full.
+
+Thanks also to the people who ran this on hardware the author does not have and reported what broke. The adapter dispatch failure on Apple silicon and the Muon learning rate problem on small models were both found that way, on an Intel Mac and a Colab T4, and both are fixed in the current version. Bug reports from a machine nobody on the project owns are worth more than they look.
 
 ## License
 

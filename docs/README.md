@@ -17,5 +17,9 @@ Read in order - written as a short book, zero prior knowledge assumed. A develop
 12. [For experienced developers: mapping this to what you know](12-for-experienced-developers.md)
 13. [Troubleshooting](13-troubleshooting.md)
 14. [From a corpus to a model](14-from-corpus-to-model.md)
+15. [Routing and serving](15-routing-and-serving.md)
+16. [What changed, and why](16-what-changed.md)
 
 New here? Run `python scripts/demo_concepts.py` (needs only numpy), then read doc 0.
+
+Coming back to a version you have not used before? Read [chapter 16](16-what-changed.md). It covers the new commands on their own, assumes nothing, and explains every term it uses.
