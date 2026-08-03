@@ -28,14 +28,18 @@ from __future__ import annotations
 import os
 
 
-TEACHER_BACKENDS = ("hf", "claude-cli", "openai", "anthropic", "gemini", "echo")
+TEACHER_BACKENDS = ("hf", "llama-cpp", "claude-cli", "openai", "anthropic",
+                    "gemini", "echo")
 
 
-def get_teacher(backend: str, model: str | None = None):
+def get_teacher(backend: str, model: str | None = None,
+                url: str | None = None):
     """Return a callable str->str for the requested teacher backend."""
     backend = backend.lower()
     if backend == "hf":
-        return _hf_teacher(model or "Qwen/Qwen3-4B")
+        return _hf_teacher(model or "Qwen/Qwen3-4B")  # 4-bit when it must
+    if backend == "llama-cpp":
+        return _local_server_teacher(url or "http://127.0.0.1:8080/v1", model)
     if backend == "claude-cli":
         return _claude_cli_teacher(model)
     if backend == "openai":
@@ -48,6 +52,66 @@ def get_teacher(backend: str, model: str | None = None):
         return lambda prompt: "(echo teacher - replace with a real backend)"
     raise ValueError(f"Unknown teacher backend '{backend}'. "
                      f"Choose from: {', '.join(TEACHER_BACKENDS)}.")
+
+
+def _local_server_teacher(base_url: str, model_name: str | None):
+    """Any local server that speaks the OpenAI chat API.
+
+    This is how a large model becomes your teacher without a byte leaving the
+    machine. It works with llama.cpp's llama-server, Ollama, LM Studio, vLLM,
+    and with STRATUM's own `stratum serve` - anything on that dialect. Run
+    `stratum teachers` first to see which model your hardware can actually
+    hold, and at what speed.
+
+    Only stdlib is used, so no dependency is added for the privilege of
+    talking to a local port.
+    """
+    import json
+    import urllib.error
+    import urllib.request
+
+    base_url = base_url.rstrip("/")
+    if not base_url.endswith("/v1"):
+        base_url += "/v1"
+    endpoint = f"{base_url}/chat/completions"
+
+    # Fail now, with a usable message, rather than on the first of 5,000 calls.
+    try:
+        with urllib.request.urlopen(f"{base_url}/models", timeout=10) as r:
+            served = json.loads(r.read().decode("utf-8")).get("data", [])
+        names = [m.get("id") for m in served if m.get("id")]
+        print(f"Local teacher at {base_url}"
+              + (f" serving: {', '.join(names[:4])}" if names else ""))
+        if model_name is None and names:
+            model_name = names[0]
+    except Exception as e:
+        raise EnvironmentError(
+            f"No local model server answering at {base_url} ({e}).\n"
+            f" - Start one, e.g. llama-server -m model.gguf -c 8192 --port 8080\n"
+            f" - Or point elsewhere with --teacher-url\n"
+            f" - Run `stratum teachers` to see which model this machine can run."
+        ) from e
+
+    def teacher(prompt: str) -> str:
+        body = json.dumps({
+            "model": model_name or "local",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0,
+            "max_tokens": 2048,
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            endpoint, data=body,
+            headers={"Content-Type": "application/json",
+                     "Authorization": "Bearer local"})
+        with urllib.request.urlopen(req, timeout=900) as r:
+            payload = json.loads(r.read().decode("utf-8"))
+        choices = payload.get("choices") or []
+        if not choices:
+            raise RuntimeError(f"Server returned no choices: {payload}")
+        from .data import strip_think
+        return strip_think(choices[0]["message"]["content"] or "")
+
+    return teacher
 
 
 def _claude_cli_teacher(model_name: str | None):
@@ -108,11 +172,30 @@ def _gemini_teacher(model_name: str):
     return teacher
 
 
-def _hf_teacher(model_name: str):
+def should_quantize_teacher(size_b: float | None, vram_gb: float) -> bool:
+    """Decide whether a teacher of this size needs 4-bit to fit the card.
+
+    Full precision costs about 2 bytes per parameter and the run needs a
+    little room on top for activations, so the test is generous rather than
+    exact. With no GPU or no known size the answer is no, because guessing
+    wrong here wastes a long download.
+    """
+    if not vram_gb or not size_b:
+        return False
+    return size_b * 2.2 > vram_gb * 0.85
+
+
+def _hf_teacher(model_name: str, load_4bit: str | bool = "auto"):
     """A local Hugging Face model as teacher.
 
-    Downloads from the Hub on first use (needs internet + `huggingface_hub`),
-    or loads from a local directory path. Runs on GPU if available.
+    Downloads from the Hub on first use, or loads from a local folder. Runs
+    on the GPU when there is one.
+
+    A teacher is only ever read, never trained, so quantizing it costs very
+    little quality and roughly quarters its memory. With load_4bit="auto" the
+    model is quantized when it would not otherwise fit in VRAM, which is what
+    lets an 8B teacher run on an 8 GB card instead of falling back to the CPU
+    and taking twenty times longer.
     """
     try:
         import torch
@@ -125,9 +208,26 @@ def _hf_teacher(model_name: str):
 
     print(f"Loading Hugging Face teacher: {model_name}")
     print("(first run downloads the model - this can take a while)")
+
+    kwargs = dict(dtype=torch.bfloat16)
+    if load_4bit == "auto":
+        from .plan import model_params_b
+        vram = (torch.cuda.get_device_properties(0).total_memory / 1e9
+                if torch.cuda.is_available() else 0)
+        load_4bit = should_quantize_teacher(model_params_b(model_name), vram)
+    if load_4bit and torch.cuda.is_available():
+        try:
+            from transformers import BitsAndBytesConfig
+            kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True)
+            print(" loading in 4-bit so it fits the GPU")
+        except Exception as e:
+            print(f" 4-bit unavailable ({e}) - loading in bf16")
+
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_name)
-        model = AutoModelForCausalLM.from_pretrained(model_name, dtype=torch.bfloat16)
+        model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
     except Exception as e:
         raise RuntimeError(
             f"Could not load teacher '{model_name}'. Common causes:\n"
@@ -139,7 +239,9 @@ def _hf_teacher(model_name: str):
 
     from .hf_utils import pick_device
     device = pick_device()
-    model.to(device).eval()
+    if "quantization_config" not in kwargs:
+        model.to(device)
+    model.eval()
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
