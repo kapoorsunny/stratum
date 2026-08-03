@@ -11,6 +11,9 @@ STRATUM command-line interface.
     stratum chat model                               talk to a model
     stratum distill ...                              student imitates a teacher
     stratum teacher-gen ...                          teacher writes training pairs
+    stratum teachers                                 which teacher can this machine run?
+    stratum route train strata/*                     learn which skill fits a request
+    stratum serve strata/* --router r.json            OpenAI-compatible endpoint
     stratum stack recipe.yaml                        run a whole build from a recipe
 
 Run `stratum <command> -h` for per-command options.
@@ -125,7 +128,28 @@ def cmd_chat(args):
     from .data import format_messages, strip_think
     from .hf_utils import encode_for_generation, load_for_inference, pick_device
 
-    model, tokenizer = load_for_inference(args.model)
+    # Several strata plus a router: chat against the pool, switching skill per
+    # turn, instead of against one merged model.
+    if len(args.model) > 1 or args.router:
+        from .serve import SkillPool
+        pool = SkillPool(args.model, router_path=args.router)
+        history = []
+        print(f"\nChat across {len(pool.names)} skills. Ctrl-C to quit.\n")
+        try:
+            while True:
+                q = input("you: ").strip()
+                if not q:
+                    continue
+                r = pool.generate(q, system=args.system, history=history)
+                history += [{"role": "user", "content": q},
+                            {"role": "assistant", "content": r["text"]}]
+                print(f"[{r['skill']}, confidence {r['confidence']:.2f}] "
+                      f"{r['text']}\n")
+        except (KeyboardInterrupt, EOFError):
+            print("\nbye")
+        return
+
+    model, tokenizer = load_for_inference(args.model[0])
     device = pick_device()
     model.to(device).eval()
 
@@ -168,6 +192,56 @@ def cmd_distill(args):
     )
 
 
+def cmd_teachers(args):
+    from .advisor import CATALOGUE, QUANTS, advise, hardware, print_advice
+    if args.quant not in QUANTS:
+        sys.exit(f"Unknown quantization '{args.quant}'. "
+                 f"Choose from: {', '.join(QUANTS)}.")
+    print("Measuring this machine...\n")
+    hw = hardware(measure=not args.no_measure)
+    rows = advise(hw, min_tok_s=args.min_tok_s, quant=args.quant)
+    print_advice(hw, rows, args.quant, args.min_tok_s, top=args.top)
+
+
+def cmd_route(args):
+    from .router import (SkillRouter, evaluate_router, strata_skill_files,
+                         train_router)
+
+    if args.route_cmd == "train":
+        try:
+            files = (dict(s.split("=", 1) for s in args.skills) if args.skills
+                     else strata_skill_files(args.strata))
+        except (ValueError, FileNotFoundError) as e:
+            sys.exit(str(e))
+        if len(files) < 2:
+            sys.exit("Routing needs at least two skills - with one there is "
+                     "nothing to choose between.")
+        router = train_router(files, args.out)
+        print()
+        evaluate_router(router, files)
+        print("\nAccuracy on training data is a floor, not a score - hold out")
+        print("real requests to know how it behaves on new ones.")
+    elif args.route_cmd == "test":
+        router = SkillRouter.load(args.router)
+        skill, confidence, scores = router.route(args.text)
+        print(f"skill      : {skill}")
+        print(f"confidence : {confidence:.3f}"
+              + ("   (low - the skills overlap for this request)"
+                 if confidence < 0.15 else ""))
+        for name, score in sorted(scores.items(), key=lambda kv: -kv[1]):
+            print(f"   {name:<24} {score:.4f}")
+
+
+def cmd_serve(args):
+    from .serve import SkillPool, serve
+    try:
+        pool = SkillPool(args.strata, router_path=args.router,
+                         base_model=args.base)
+    except (ValueError, FileNotFoundError) as e:
+        sys.exit(str(e))
+    serve(pool, host=args.host, port=args.port, system=args.system)
+
+
 def cmd_corpus_fetch(args):
     from .corpus import fetch_urls
 
@@ -197,10 +271,19 @@ def cmd_corpus_ingest(args):
 
 
 def cmd_corpus_pairs(args):
-    from .corpus import generate_pairs
+    from .corpus import generate_pairs, check_pairs_args
     from .teachers import get_teacher
 
-    teacher_fn = get_teacher(args.teacher, model=args.model)
+    # Loading a teacher can mean a long download, so every argument is
+    # checked before that happens rather than after.
+    try:
+        check_pairs_args(args.chunks, args.out, args.test_out,
+                         args.test_fraction, args.per_chunk)
+    except (ValueError, FileNotFoundError) as e:
+        sys.exit(str(e))
+
+    teacher_fn = get_teacher(args.teacher, model=args.model,
+                             url=getattr(args, 'teacher_url', None))
     try:
         generate_pairs(args.chunks, args.instruction, teacher_fn,
                        out_train=args.out, out_test=args.test_out,
@@ -217,7 +300,8 @@ def cmd_teacher_gen(args):
     seeds = [l.strip() for l in
              Path(args.seeds).read_text(encoding="utf-8").splitlines() if l.strip()]
     print(f"Loaded {len(seeds)} seed inputs from {args.seeds}")
-    teacher_fn = get_teacher(args.teacher, model=args.model)
+    teacher_fn = get_teacher(args.teacher, model=args.model,
+                             url=getattr(args, 'teacher_url', None))
     generate_dataset_from_teacher(seeds, args.instruction, teacher_fn, args.out)
 
 
@@ -307,7 +391,7 @@ def cmd_stack(args):
         common = dict(
             rank=st.get("rank", 16),
             epochs=st.get("epochs", 3),
-            lr=stratum_setting(recipe, st, "lr", 2e-2),
+            lr=stratum_setting(recipe, st, "lr", None),
             batch_size=stratum_setting(recipe, st, "batch_size", 4),
             max_len=stratum_setting(recipe, st, "max_len", 1024),
             system=stratum_setting(recipe, st, "system", None),
@@ -382,7 +466,10 @@ def main():
     t.add_argument("--out", required=True)
     t.add_argument("--base", default="Qwen/Qwen3-1.7B")
     t.add_argument("--rank", type=int, default=16)
-    t.add_argument("--lr", type=float, default=2e-2, help="Muon learning rate")
+    t.add_argument("--lr", type=float, default=None,
+                   help="Muon learning rate. Default scales with base size "
+                        "(5e-3 under 2B, 1e-2 under 8B, 2e-2 above) because "
+                        "Muon's step is independent of weight magnitude")
     t.add_argument("--adamw-lr", type=float, default=1e-3,
                    help="learning rate for the AdamW side (non-matrix params, or everything with --optimizer adamw)")
     t.add_argument("--epochs", type=int, default=3)
@@ -425,10 +512,47 @@ def main():
                    help="also score this model (usually the base) for comparison")
     e.set_defaults(func=cmd_eval)
 
-    c = sub.add_parser("chat", help="talk to a model")
-    c.add_argument("model")
+    c = sub.add_parser("chat", help="talk to a model, or to a pool of skills")
+    c.add_argument("model", nargs="+",
+                   help="a merged model, one stratum, or several strata to "
+                        "route between")
+    c.add_argument("--router", default=None,
+                   help="router JSON from `stratum route train` - picks the "
+                        "skill for each turn")
     c.add_argument("--system", default=None)
     c.set_defaults(func=cmd_chat)
+
+    th = sub.add_parser("teachers", help="which teacher model can this machine run, and how fast")
+    th.add_argument("--quant", default="Q4_K_M",
+                    help="quantization to assume (Q8_0/Q6_K/Q5_K_M/Q4_K_M/Q3_K_M/Q2_K)")
+    th.add_argument("--min-tok-s", type=float, default=3.0,
+                    help="tokens/sec below which a model is not worth using")
+    th.add_argument("--top", type=int, default=12, help="rows to show")
+    th.add_argument("--no-measure", action="store_true",
+                    help="skip the bandwidth measurement and assume a default")
+    th.set_defaults(func=cmd_teachers)
+
+    rt = sub.add_parser("route", help="route requests to the right skill instead of merging")
+    rtsub = rt.add_subparsers(dest="route_cmd", required=True)
+    rtt = rtsub.add_parser("train", help="learn a router from the strata's own training data")
+    rtt.add_argument("strata", nargs="*", help="stratum folders")
+    rtt.add_argument("--skills", nargs="*", default=None,
+                     help="name=file.jsonl pairs, if the strata cannot be read")
+    rtt.add_argument("--out", default="router.json")
+    rtt.set_defaults(func=cmd_route)
+    rte = rtsub.add_parser("test", help="see which skill a request routes to")
+    rte.add_argument("text")
+    rte.add_argument("--router", default="router.json")
+    rte.set_defaults(func=cmd_route)
+
+    sv = sub.add_parser("serve", help="serve strata over an OpenAI-compatible API")
+    sv.add_argument("strata", nargs="+", help="stratum folders sharing one base")
+    sv.add_argument("--router", default=None, help="router JSON for per-request routing")
+    sv.add_argument("--base", default=None, help="override the base model id")
+    sv.add_argument("--host", default="127.0.0.1")
+    sv.add_argument("--port", type=int, default=8927)
+    sv.add_argument("--system", default=None, help="default system prompt")
+    sv.set_defaults(func=cmd_serve)
 
     di = sub.add_parser("distill", help="train a student stratum by imitating a teacher (logit distillation)")
     di.add_argument("--skill", required=True)
@@ -487,8 +611,12 @@ def main():
     cp.add_argument("--out", required=True, help="training JSONL (re-run to resume)")
     cp.add_argument("--test-out", default=None,
                     help="held-out test JSONL - required when --test-fraction > 0")
+    cp.add_argument("--teacher-url", default=None,
+                    help="base URL for --teacher llama-cpp "
+                         "(default http://127.0.0.1:8080/v1)")
     cp.add_argument("--teacher", default="hf",
-                    choices=["hf", "claude-cli", "openai", "anthropic", "gemini", "echo"],
+                    choices=["hf", "llama-cpp", "claude-cli", "openai",
+                             "anthropic", "gemini", "echo"],
                     help="teacher backend. claude-cli uses your Claude Code "
                          "subscription, no API key. Everything except hf/echo "
                          "sends chunks to that provider - use hf for data "
@@ -513,8 +641,12 @@ def main():
                          "pipeline (doc 7)")
     tg.add_argument("--instruction", required=True, help="what the skill should do, one line")
     tg.add_argument("--out", required=True, help="output training JSONL (re-run to resume)")
+    tg.add_argument("--teacher-url", default=None,
+                    help="base URL for --teacher llama-cpp "
+                         "(default http://127.0.0.1:8080/v1)")
     tg.add_argument("--teacher", default="hf",
-                    choices=["hf", "claude-cli", "openai", "anthropic", "gemini", "echo"],
+                    choices=["hf", "llama-cpp", "claude-cli", "openai",
+                             "anthropic", "gemini", "echo"],
                     help="teacher backend. claude-cli uses your Claude Code "
                          "subscription, no API key. Everything except hf/echo "
                          "sends seeds to that provider - use hf for data "
@@ -543,7 +675,7 @@ def main():
     # pair is fatal for all of them. Check once, here, rather than letting
     # each one crash inside a library import with an unreadable traceback.
     if args.cmd in {"train", "merge", "eval", "chat", "distill",
-                    "teacher-gen", "stack"}:
+                    "teacher-gen", "stack", "serve"}:
         from .hf_utils import require_torch_stack
         require_torch_stack()
 

@@ -524,6 +524,35 @@ def _is_test_chunk(chunk_id: str, test_fraction: float, seed: int) -> bool:
     return (int(h[:8], 16) / 0xFFFFFFFF) < test_fraction
 
 
+def check_pairs_args(chunks_path: str, out_train: str, out_test: str | None,
+                     test_fraction: float, per_chunk: int) -> None:
+    """Check everything that can be checked without calling a teacher.
+
+    A teacher can take half an hour to download, so a run that is going to
+    fail on a bad argument should fail in the first second instead of after
+    the download. Raises with a message that says what to change.
+    """
+    if not Path(chunks_path).exists():
+        raise FileNotFoundError(
+            f"No chunk file at {chunks_path}. Run `stratum corpus ingest` "
+            f"first to turn your documents into chunks.")
+    if not (0 <= test_fraction < 1):
+        raise ValueError(
+            f"--test-fraction must be between 0 and 1, got {test_fraction}.")
+    if test_fraction > 0 and not out_test:
+        raise ValueError(
+            f"--test-fraction is {test_fraction} but no --test-out was given, "
+            f"so the held-out pairs would have nowhere to go.\n"
+            f" - Add --test-out <path> to keep a test set, or\n"
+            f" - add --test-fraction 0 to put every pair in training.")
+    if out_test and Path(out_test).resolve() == Path(out_train).resolve():
+        raise ValueError(
+            "--out and --test-out point at the same file, which would put "
+            "the test pairs into training and make the score meaningless.")
+    if per_chunk < 1:
+        raise ValueError(f"--per-chunk must be at least 1, got {per_chunk}.")
+
+
 def generate_pairs(chunks_path: str, instruction: str, teacher_fn,
                    out_train: str, out_test: str | None = None,
                    per_chunk: int = 3, test_fraction: float = 0.1,
