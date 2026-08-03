@@ -69,6 +69,11 @@ That number is also the honest test of whether your skills should be routed at a
 |---|---|---|---|
 | extract vs classify | 100% | 4 of 4 correct, confidence 0.38-0.82 | route them |
 | three skills from one corpus | 98.9% | misrouted, confidence 0.02-0.13 | merge them |
+| the same three from a corpus 3.6x larger | 92.5% | 3 of 3 correct, confidence 0.003-0.035 | merge them |
+
+The third row was run to check whether more data would rescue the second, and it does not. A corpus of 1,097 chunks instead of 300 moved training accuracy around a little and left confidence where it was, near zero.
+
+It is worth looking at what that row actually did, because it is the router behaving well rather than badly. Asked three clearly different questions, it picked the right skill every time, and reported that it could not tell. Both of those are true at once. The winner really was slightly ahead, and slightly ahead of two others out of three is not a decision worth acting on. A router that reported 0.9 there would be lying.
 
 The second row is the interesting one. Those three skills were generated from the same document set with different instructions, and the teacher wrote similarly-worded questions for all of them. They are not separable from the request text, and no router can fix that - the information simply is not in the input.
 
