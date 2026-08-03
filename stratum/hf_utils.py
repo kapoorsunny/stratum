@@ -64,6 +64,16 @@ def check_torch_stack(verbose: bool = False) -> dict:
                 f"disabled PyTorch entirely.")
             status["fix"] = _torch_stack_fix()
 
+        # peft's optional backends are a separate way for a healthy-looking
+        # stack to fail, and they fail late - after the base model downloads.
+        if status["ok"]:
+            peft_ok, peft_msg = check_peft_dispatch()
+            status["peft_dispatch"] = peft_ok
+            if not peft_ok:
+                status["ok"] = False
+                status["problem"] = peft_msg
+                status["fix"] = peft_dispatch_advice(peft_msg).splitlines()[2:]
+
     if verbose:
         print("Library versions:")
         for pkg in ("torch", "transformers", "peft", "accelerate"):
@@ -72,12 +82,82 @@ def check_torch_stack(verbose: bool = False) -> dict:
             print(" these versions work together: yes")
         else:
             print(f"\n PROBLEM: {status['problem']}")
-            print(" Every command that loads a model will fail with"
-                  ' "NameError: name \'torch\' is not defined".')
+            if status.get("peft_dispatch") is False:
+                print(" Every command that trains will fail here - and only "
+                      "after the base model\n has downloaded, which is why "
+                      "this check runs first.")
+            else:
+                print(" Every command that loads a model will fail with"
+                      ' "NameError: name \'torch\' is not defined".')
             print("\n Fix it with:")
             for line in status["fix"]:
                 print(f"   {line}")
     return status
+
+
+def check_peft_dispatch() -> tuple[bool, str]:
+    """Attach a LoRA adapter to a two-parameter model, to prove peft works.
+
+    peft dispatches LoRA through optional backends (torchao, awq, eetq and
+    more), and some of their availability checks RAISE on a wrong version
+    instead of returning False. The result is an ImportError from deep inside
+    peft during get_peft_model - naming a package the build never asked for,
+    and only after the base model has downloaded. On a metered connection
+    that mistake costs gigabytes.
+
+    Exercising the same dispatch path on a toy model costs milliseconds and
+    catches the whole class, including backends that do not exist yet.
+    Returns (ok, message).
+    """
+    try:
+        import torch.nn as nn
+        from peft import LoraConfig, get_peft_model
+
+        class _Tiny(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.proj = nn.Linear(4, 4)
+
+            def forward(self, x):
+                return self.proj(x)
+
+        get_peft_model(_Tiny(), LoraConfig(target_modules=["proj"]))
+        return True, ""
+    except ImportError as e:
+        return False, str(e)
+    except Exception as e:
+        # A non-import failure here is not the problem this guards against,
+        # so do not block the build on it.
+        return True, f"(peft probe inconclusive: {type(e).__name__}: {e})"
+
+
+def peft_dispatch_advice(message: str) -> str:
+    """Turn a peft backend ImportError into instructions worth reading."""
+    lower = message.lower()
+    lines = [f"peft cannot attach a LoRA adapter: {message}", ""]
+    if "torchao" in lower:
+        lines += [
+            "torchao is the usual culprit, and Google Colab preinstalls an old one.",
+            "STRATUM does not use torchao, so removing it is safe:",
+            "  pip uninstall -y torchao",
+        ]
+    else:
+        pkg = next((w.strip(".,'\"") for w in message.split()
+                    if w.strip(".,'\"").isidentifier()
+                    and w.strip(".,'\"") not in ("Found", "an", "of", "but",
+                                                 "only", "versions", "above",
+                                                 "are", "supported",
+                                                 "incompatible", "version")),
+                   "that package")
+        lines += [
+            f"peft dispatches through optional backends, and {pkg} is at a "
+            f"version it rejects.",
+            f"STRATUM does not need it, so the quickest fix is usually:",
+            f"  pip uninstall -y {pkg}",
+            "Otherwise upgrade it to the version the message names.",
+        ]
+    lines += ["", "Then re-run `stratum doctor` to confirm."]
+    return "\n".join(lines)
 
 
 def _torch_stack_fix() -> list[str]:
@@ -115,7 +195,7 @@ def require_torch_stack() -> None:
     if status["ok"]:
         return
     lines = [status["problem"], ""]
-    lines += ["Fix it with:"] + [f"  {f}" for f in status["fix"]]
+    lines += ["Fix it with:"] + [f"  {f}" for f in status["fix"] if f]
     lines += ["", "Then re-run `stratum doctor` to confirm."]
     raise SystemExit("\n".join(lines))
 

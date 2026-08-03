@@ -200,6 +200,11 @@ def distill_tile(
     from .muon import Muon, split_params_for_muon
     from .train import set_seed
 
+    from .hf_utils import check_peft_dispatch, peft_dispatch_advice
+    ok, why = check_peft_dispatch()
+    if not ok:
+        raise RuntimeError(peft_dispatch_advice(why))
+
     set_seed(seed)
     rows = load_jsonl(skill_path, required_keys=("prompt", "response"))
     print(f"Distilling {student_model} from teacher {teacher_model}")

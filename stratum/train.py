@@ -23,6 +23,54 @@ from .data import check_training_data, file_sha256, load_jsonl, make_batches
 from .muon import Muon, split_params_for_muon
 
 
+def default_muon_lr(base_model: str) -> float:
+    """Muon's learning rate, scaled to the size of the base model.
+
+    Muon orthogonalizes the update before applying it, so the step's size is
+    set by the learning rate and the matrix shape - NOT by how large the
+    weights being updated are. A small model has smaller weights, so the same
+    learning rate is a proportionally larger perturbation, and 2e-2 can push
+    it into divergence: loss falls for a while, then climbs, and the run
+    still finishes and saves a stratum that scores zero.
+
+    Two independent reports hit this on Qwen3-0.6B and Qwen3-1.7B, both fixed
+    by 5e-3. Larger bases have run fine at 2e-2, so the default scales rather
+    than dropping for everyone. Pass --lr to override, and note that the risk
+    also grows with the number of optimizer steps per epoch - a big dataset
+    gives divergence more chances to start than a small one.
+    """
+    from .plan import model_params_b
+
+    size = model_params_b(base_model)
+    if size is None:
+        return 1e-2       # unknown size (a local path) - take the middle road
+    if size < 2:
+        return 5e-3
+    if size < 8:
+        return 1e-2
+    return 2e-2
+
+
+def epoch_verdict(avg_loss: float, best_loss: float,
+                  first_loss: float | None) -> dict:
+    """Decide what an epoch's average loss means.
+
+    Kept separate from the training loop so the rule can be tested without
+    training anything. Two judgements:
+
+      improved  this epoch beats every earlier one, so its weights are the
+                ones worth keeping
+      diverging loss has climbed back above where the first epoch left it,
+                which for Muon at too high a learning rate is the signature
+                of a run that will finish, report success, and save a
+                stratum that scores zero
+    """
+    improved = avg_loss < best_loss
+    diverging = (not improved and first_loss is not None
+                 and avg_loss > first_loss)
+    return {"improved": improved, "diverging": diverging}
+
+
 def set_seed(seed: int):
     random.seed(seed)
     torch.manual_seed(seed)
@@ -36,7 +84,7 @@ def train_tile(
     base_model: str = "Qwen/Qwen3-1.7B",
     rank: int = 16,
     lora_alpha: int | None = None,
-    lr: float = 2e-2,
+    lr: float | None = None,
     adamw_lr: float = 1e-3,
     epochs: int = 3,
     batch_size: int = 4,
@@ -54,9 +102,22 @@ def train_tile(
 
     set_seed(seed)
     lora_alpha = lora_alpha or rank * 2
+    if lr is None:
+        lr = default_muon_lr(base_model)
+        if optimizer == "muon":
+            print(f"Muon learning rate {lr:g} (scaled to the size of "
+                  f"{base_model} - override with --lr)")
 
     rows = load_jsonl(skill_path, required_keys=("prompt", "response"))
     print(f"Loaded {len(rows)} training pairs from {skill_path}")
+
+    # Prove peft can attach an adapter BEFORE downloading gigabytes of base
+    # model. Its optional backends can be at versions it rejects, and the
+    # error otherwise arrives eleven frames deep, after the download.
+    from .hf_utils import check_peft_dispatch, peft_dispatch_advice
+    ok, why = check_peft_dispatch()
+    if not ok:
+        raise RuntimeError(peft_dispatch_advice(why))
 
     # Friendly preflight: catch a bad model id before the cryptic download error.
     from .hf_utils import resolve_model_hint
@@ -108,7 +169,10 @@ def train_tile(
         bias="none",
         task_type="CAUSAL_LM",
     )
-    model = get_peft_model(model, lora_cfg)
+    try:
+        model = get_peft_model(model, lora_cfg)
+    except ImportError as e:
+        raise RuntimeError(peft_dispatch_advice(str(e))) from e
     model.print_trainable_parameters()
 
     from .hf_utils import pick_device
@@ -143,14 +207,19 @@ def train_tile(
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
-    def save_checkpoint(epochs_completed, loss_so_far):
+    def save_checkpoint(epochs_completed, loss_so_far, best_epoch=None,
+                        diverged=False, weights=True):
         # The adapter is a few megabytes, so saving after every epoch is
         # nearly free - and it means a long run that gets killed (power, OOM,
         # an impatient operator) leaves the last full epoch usable instead
         # of nothing. On a slow CPU run this is the difference between
         # losing an hour and losing nothing.
-        model.save_pretrained(str(out_path))
-        tokenizer.save_pretrained(str(out_path))
+        # weights=False updates only the provenance card. The final call
+        # after a diverging run must NOT write the current (bad) weights over
+        # the good ones already on disk from the best epoch.
+        if weights:
+            model.save_pretrained(str(out_path))
+            tokenizer.save_pretrained(str(out_path))
         card = {
             "stratum_name": out_path.name,
             "base_model": base_model,
@@ -168,6 +237,8 @@ def train_tile(
             "skill_sha256": file_sha256(skill_path),
             "num_pairs": len(rows),
             "median_response_tokens": data_stats["median_response_tokens"],
+            "best_epoch": best_epoch if best_epoch is not None else epochs_completed,
+            "diverged": bool(diverged),
             "final_loss": loss_so_far,
             "seed": seed,
             "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -177,8 +248,20 @@ def train_tile(
                                                     encoding="utf-8")
 
     # Training loop with gradient accumulation.
+    #
+    # Two things guard against a diverging run, which for Muon at a high
+    # learning rate has a deceptive shape: loss falls for a while, then
+    # climbs. Left alone, such a run finishes, reports success, and saves a
+    # stratum that scores zero.
+    #   - only an epoch that IMPROVES on the best so far overwrites the saved
+    #     adapter, so a late blow-up cannot destroy good earlier weights
+    #   - rising loss is called out while it is happening, naming --lr
     t0 = time.time()
     final_loss = None
+    best_loss = float("inf")
+    best_epoch = 0
+    first_epoch_loss = None
+    diverged = False
     for epoch in range(epochs):
         random.shuffle(rows)
         total, n_steps = 0.0, 0
@@ -216,10 +299,41 @@ def train_tile(
 
         avg = total / max(n_steps, 1)
         final_loss = avg
-        save_checkpoint(epoch + 1, avg)
-        print(f"epoch {epoch+1}/{epochs} avg loss {avg:.4f} "
-              f"({time.time()-t0:.0f}s elapsed) - checkpoint saved")
+        if first_epoch_loss is None:
+            first_epoch_loss = avg
+        elapsed = f"({time.time()-t0:.0f}s elapsed)"
+
+        verdict = epoch_verdict(avg, best_loss, first_epoch_loss
+                                if epoch else None)
+        if verdict["improved"]:
+            best_loss, best_epoch = avg, epoch + 1
+            save_checkpoint(epoch + 1, avg, best_epoch=best_epoch)
+            print(f"epoch {epoch+1}/{epochs} avg loss {avg:.4f} {elapsed} "
+                  f"- checkpoint saved")
+        else:
+            print(f"epoch {epoch+1}/{epochs} avg loss {avg:.4f} {elapsed} "
+                  f"- WORSE than epoch {best_epoch} ({best_loss:.4f}), "
+                  f"keeping that checkpoint")
+            if verdict["diverging"]:
+                diverged = True
+                print("  Training is diverging: loss is now above where it "
+                      "started. The usual")
+                print(f"  cause is the learning rate. Muon's default 2e-2 is "
+                      f"too high for some")
+                print(f"  data - stop and re-run with --lr 5e-3 (in a recipe, "
+                      f"lr: 5.0e-3).")
+
+    if best_epoch:
+        save_checkpoint(epochs, best_loss, best_epoch=best_epoch,
+                        diverged=diverged, weights=False)
 
     print(f"\nStratum saved to {out_dir}")
-    print(f" base: {base_model} rank: {rank} final loss: {final_loss:.4f}")
-    return final_loss
+    print(f" base: {base_model} rank: {rank} loss: {best_loss:.4f} "
+          f"(from epoch {best_epoch} of {epochs})")
+    if diverged:
+        print("\n WARNING: this run diverged. The saved weights are from the "
+              "best epoch, so\n they are usable, but the stratum is very "
+              "likely under-trained. Re-run with\n --lr 5e-3 before trusting "
+              "it, and check `stratum eval` either way.\n The card records "
+              '"diverged": true.')
+    return best_loss
