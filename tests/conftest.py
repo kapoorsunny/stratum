@@ -63,6 +63,26 @@ def tiny_base(tmp_path_factory):
     return str(out)
 
 
+@pytest.fixture(scope="session")
+def two_strata(tiny_base, tmp_path_factory):
+    """Two trained strata off the tiny base, shared by every test that needs
+    a real adapter to merge, route or serve."""
+    from stratum.train import train_tile
+
+    root = tmp_path_factory.mktemp("strata")
+    examples = Path(__file__).parent.parent / "examples"
+    dirs = []
+    for name in ("extract", "classify"):
+        out = root / name
+        loss = train_tile(
+            skill_path=str(examples / f"{name}.jsonl"), out_dir=str(out),
+            base_model=tiny_base, rank=4, epochs=2, batch_size=2,
+            grad_accum=2, max_len=96, load_4bit=False, seed=7)
+        assert loss is not None and loss == loss
+        dirs.append(str(out))
+    return dirs
+
+
 @pytest.fixture()
 def skill_file(tmp_path):
     """A small training file in the standard prompt/response shape."""

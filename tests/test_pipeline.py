@@ -16,27 +16,6 @@ from stratum.merge import (extract_deltas, load_stratum_factors, merge,
 from stratum.train import train_tile
 
 
-@pytest.fixture(scope="session")
-def two_strata(tiny_base, tmp_path_factory):
-    """Train two strata off the tiny base, once per test session."""
-    root = tmp_path_factory.mktemp("strata")
-    examples = Path(__file__).parent.parent / "examples"
-
-    dirs = []
-    for name in ("extract", "classify"):
-        out = root / name
-        loss = train_tile(
-            skill_path=str(examples / f"{name}.jsonl"),
-            out_dir=str(out),
-            base_model=tiny_base,
-            rank=4, epochs=2, batch_size=2, grad_accum=2, max_len=96,
-            load_4bit=False, seed=7,
-        )
-        assert loss is not None and loss == loss  # finished with a real number
-        dirs.append(str(out))
-    return dirs
-
-
 def test_train_writes_adapter_and_card(two_strata, tiny_base):
     for d in two_strata:
         assert (Path(d) / "adapter_model.safetensors").exists()
