@@ -116,3 +116,21 @@ def test_chunks_map_yields_every_item_at_any_concurrency():
     for workers in (1, 4, 16):
         got = sorted(_map_chunks(lambda x: x * 2, items, workers))
         assert got == [x * 2 for x in items]
+
+
+def test_printing_survives_characters_a_console_cannot_draw(capsys):
+    """A model trained on engineering documents writes Greek letters, and a
+    Windows console defaults to an encoding that cannot hold them."""
+    import io
+    import sys
+
+    from stratum.__main__ import use_utf8_output
+
+    old = sys.stdout
+    try:
+        sys.stdout = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+        use_utf8_output()
+        print("delta \u0394 ohm \u03a9 micro \u03bc degree \u00b0")
+        sys.stdout.flush()
+    finally:
+        sys.stdout = old

@@ -25,6 +25,29 @@ import sys
 from pathlib import Path
 
 
+def use_utf8_output() -> None:
+    """Make printing survive any character a model can produce.
+
+    Windows still defaults its console to an eight bit code page, so the
+    first time a model writes a Greek letter or a degree sign the print
+    raises and takes the whole run with it. That is not a rare corner. A
+    model trained on engineering documents writes delta and ohm and micro
+    constantly, and losing a completed evaluation to the last line of its
+    own output is a bad way to find out.
+
+    Nothing is dropped either way. Characters the terminal genuinely cannot
+    draw are replaced rather than raising, so output is always readable and
+    never fatal.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            # Older Python, or a stream that is not a real file. Printing
+            # still works, it just keeps whatever encoding it had.
+            pass
+
+
 def cmd_setup(args):
     from .setup_env import run_setup
     result = run_setup(dry_run=args.dry_run)
@@ -464,6 +487,7 @@ def cmd_stack(args):
 
 
 def main():
+    use_utf8_output()
     p = argparse.ArgumentParser(prog="stratum",
                                 description="Build specialized SLMs from mergeable skill strata.")
     sub = p.add_subparsers(dest="cmd", required=True)
