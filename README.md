@@ -39,15 +39,31 @@ STRATUM rests on a few techniques. Understand these and you understand the proje
 3. **Muon** - a newer optimizer that keeps half the memory of AdamW and reaches quality in fewer steps, by balancing every training update. -> [doc 4](docs/04-muon-explained.md)
 4. **Distillation** - teach your small model to imitate a big "teacher" model, so it captures the teacher's skill at a fraction of the size. Two flavors: the teacher writes your training data, or the student directly matches the teacher's probability distribution. -> [doc 7](docs/07-distillation.md)
 
+## New since the last version
+
+Coming back to this? [Chapter 16](docs/16-what-changed.md) covers all of it properly, assuming nothing and explaining every term. The short version:
+
+| | |
+|---|---|
+| **`stratum setup`** | Installs whatever your machine is missing. Knows a Mac needs different advice from an NVIDIA box, including that 4-bit will never work there |
+| **`stratum route`** | Keeps skills in separate adapters and picks one per request, instead of merging them. Use it when merging starts diluting them |
+| **`stratum serve`** | Puts your model behind an OpenAI-compatible address, so your IDE, Claude Code, or any client with a base-URL box can use it |
+| **`stratum teachers`** | Tells you which large models this machine can actually run, and how fast |
+| **`--concurrency`** | Asks an API teacher several questions at once instead of one at a time |
+| **Local teachers auto-compress** | An 8B teacher drops to 4-bit when it would not otherwise fit your card, instead of falling back to the CPU |
+| **[`engine/`](engine/README.md)** | Optional C tools. Nothing in the Python side uses them - see [below](#the-engine-folder) |
+
+Two reported bugs are fixed: training could save a diverged epoch over a good one, and adapters failed to attach on some machines only after a multi-gigabyte download had finished. Both now have tests.
+
 ## Quick start
 
 ```bash
 # install
 git clone https://github.com/sarkar4777/stratum.git && cd stratum
 pip install -e .
-pip install bitsandbytes # for 4-bit / QLoRA on NVIDIA GPUs
 
-# check your hardware AND that the installed libraries match
+# install whatever this machine is missing, and check what it is
+stratum setup
 stratum doctor
 
 # understand it first (no GPU, ~20s)
@@ -68,6 +84,10 @@ stratum merge strata/extract strata/classify --out models/my-slm
 stratum eval models/my-slm --test examples/test-extract.jsonl --scorer json_field
 stratum eval models/my-slm --test examples/test-classify.jsonl --scorer exact
 stratum chat models/my-slm
+
+# or keep the skills apart and route between them instead of merging
+stratum route train strata/extract strata/classify --out router.json
+stratum serve strata/* --router router.json --port 8927
 ```
 
 `stratum doctor` is worth running before anything else: as well as your GPU it
@@ -99,8 +119,12 @@ flowchart TD
     T1 --> M{{Fuse strata<br/>linear / TIES / DARE}}
     T2 --> M
     T3 --> M
+    T1 -.-> R{{Or route<br/>keep them separate}}
+    T2 -.-> R
+    T3 -.-> R
     M --> E[Evaluate<br/>held-out test set, a real number]
-    E --> S[Serve<br/>vLLM / llama.cpp, your own environment]
+    R --> E
+    E --> S[Serve<br/>stratum serve, vLLM or llama.cpp]
 
     classDef base fill:#2d1a52,stroke:#1b1035,color:#fff
     classDef tile fill:#7F77DD,stroke:#1b1035,color:#fff
@@ -108,9 +132,11 @@ flowchart TD
     classDef out fill:#EF9F27,stroke:#1b1035,color:#1b1035
     class B base
     class T1,T2,T3 tile
-    class M fuse
+    class M,R fuse
     class E,S out
 ```
+
+Merging and routing are the two ways to end up with one thing that does several jobs. Merge when the skills complement each other, route when they interfere. [Chapter 15](docs/15-routing-and-serving.md) has the rule for telling which case you are in, and it is measurable rather than a judgement call.
 
 Each stratum is trained on its own, one at a time, so you never hold more than one small tile in memory. They fuse into a single model at the end.
 
@@ -133,6 +159,10 @@ Each stratum is trained on its own, one at a time, so you never hold more than o
 | 12 | [For experienced developers](docs/12-for-experienced-developers.md) | Every concept mapped to patterns you know |
 | 13 | [Troubleshooting](docs/13-troubleshooting.md) | The problems people actually hit, with fixes |
 | 14 | [From a corpus to a model](docs/14-from-corpus-to-model.md) | Thousands of real documents and images in, tested SLM out - and the RAG boundary |
+| 15 | [Routing and serving](docs/15-routing-and-serving.md) | Picking a skill per request instead of merging, and putting it behind an address |
+| 16 | [What changed, and why](docs/16-what-changed.md) | Every new command explained from zero, plus what the `engine/` folder is |
+
+**Used an earlier version?** Start at [16](docs/16-what-changed.md) instead. It stands alone.
 
 A complete worked example lives in [`examples/energy/`](examples/energy/): a public web corpus turned into a tested energy-sector SLM, with every command, the measured gains over the base model, and the two failures the build hit on the way.
 
@@ -147,6 +177,29 @@ STRATUM suits real domain deployments because a production model usually needs s
 - **Cost** - one small serving GPU forever, plus a few tens of dollars of training burst per build.
 
 [Doc 10](docs/10-scaling-and-production.md) covers the full production loop.
+
+## The engine folder
+
+There is C code in [`engine/`](engine/README.md). **Nothing in STRATUM calls it, you never need to compile it, and skipping this section costs you nothing.** It is explained here because unexplained C in a Python project is worse than no C at all.
+
+**What it is.** Two finished, tested command line tools and the code they share.
+
+```bash
+cd engine && make          # any C99 compiler, no dependencies
+```
+
+| Tool | What it does |
+|---|---|
+| `stratum-gguf FILE` | Prints what is inside a GGUF model file - its architecture, layer count, how it was quantized, and every tensor if you ask. Reads only the directory, so it answers instantly on a file of any size |
+| `stratum-bandwidth FILE` | Reads the same blocks from a file in three different orders and reports the speed of each. Reads bypass the operating system cache, so it measures your drive rather than your memory |
+
+**Where it plugs in.** Nowhere, and that is deliberate rather than unfinished. Both are standalone diagnostics you run yourself. `stratum-gguf` tells you what a model you downloaded actually is. `stratum-bandwidth` answers a question about your hardware.
+
+**Why it exists at all.** It was the beginning of an inference engine for running enormous sparse models as teachers, inspired by [kimi-k3-in-c](https://github.com/FareedKhan-dev/kimi-k3-in-c). The design was reviewed before being built and two findings stopped it: the core scheduling idea turned out to be [published prior art](engine/README.md#credit-where-it-is-due), and measurement showed the disk was never the bottleneck in the first place - the arithmetic is roughly twelve times slower than the reading.
+
+The measuring tool is what produced that second finding, which is why it is the part that shipped. [engine/README.md](engine/README.md) has the full account, including the numbers that killed the idea.
+
+If you want to run a large model locally today, use [llama.cpp](https://github.com/ggml-org/llama.cpp) or [Ollama](https://ollama.com), and run `stratum teachers` to see which ones fit. STRATUM talks to either through `--teacher llama-cpp`.
 
 ## What STRATUM is *not*
 

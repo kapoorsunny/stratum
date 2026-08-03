@@ -241,6 +241,36 @@ Three checks worth doing before you spend the compute:
 - **You need the absolute best small-model quality and have a same-family teacher.** -> logit distillation.
 - **You already have plenty of good real data and no better teacher.** -> skip distillation - plain `stratum train` is fine.
 
+## Two teachers on the same documents
+
+This is worth showing because the result is not the one you would guess.
+
+The same 1,097 chunks of energy engineering documents were given to two teachers, with identical instructions, and three skills were built from each. Every stratum is `Qwen3-1.7B`, rank 16, three epochs. Each was scored against its own teacher's held-out questions with the word overlap scorer.
+
+| Skill | Claude as teacher | Qwen3-8B as teacher |
+|---|---|---|
+| explain | 27.8% | **33.1%** |
+| extract | **48.1%** | 3.6% |
+| safety | 24.5% | **29.8%** |
+
+The local 8B model wins two of the three, which is not what most people expect from a small local teacher against a large hosted one.
+
+The third row is where the lesson is, and it is not that Qwen cannot extract. Look at how long each teacher's answers are:
+
+| Skill | Claude, median answer | Qwen3-8B, median answer |
+|---|---|---|
+| explain | 57 words | 25 words |
+| extract | 14 words | **2 words** |
+| safety | 46 words | 24 words |
+
+Asked for a specific value, Qwen answered with the value and nothing else. `60% to 75%`. `Weeks`. Claude wrote a sentence around it.
+
+Word overlap scoring is merciless on a two word answer. Reply `Between 70 and 90 percent` when the expected answer is `60% to 75%` and you score zero, with no partial credit for having understood the question. On a fourteen word answer the same near miss still scores something.
+
+So part of that 3.6% is the scorer, and part of it is real, and separating the two is the actual work. The model genuinely got some values wrong. It was also punished far harder for it than the other model was.
+
+**Two things follow.** Your scorer has to match the shape of the answers your teacher writes, and doc 8 covers picking one. And when you compare teachers, compare the answer lengths first, because a teacher that writes tersely will look worse than it is under any overlap based score.
+
 ## The honest caveats
 
 - **The student can't exceed the teacher** on the distilled skill - it's imitating. If the teacher is wrong, the student learns the mistake. Use a teacher genuinely better than your student.
