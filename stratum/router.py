@@ -40,7 +40,9 @@ import re
 from collections import Counter
 from pathlib import Path
 
-_TOKEN = re.compile(r"[a-z0-9]+")
+# Word characters rather than a literal a-z range, so routing works on
+# corpora that are not written in Latin script. See context.py.
+_TOKEN = re.compile(r"[^\W_]+(?:[-_.][^\W_]+)*")
 
 
 def _features(text: str, char_ngrams: int = 4) -> Counter:
@@ -79,6 +81,16 @@ class SkillRouter:
                    for f, c in feats.items() if f in self.idf})
         return {skill: sum(w * centroid.get(f, 0.0) for f, w in vec.items())
                 for skill, centroid in self.centroids.items()}
+
+    def prefers_visual(self, text: str) -> bool:
+        """Whether this request is asking about something that was a picture.
+
+        Kept beside routing rather than inside it, so a caller can see the
+        reason and override it. A skill whose name says it handles images
+        gets preferred when this is true and the margin is small.
+        """
+        from .context import looks_visual
+        return looks_visual(text)
 
     def route(self, text: str) -> tuple[str, float, dict[str, float]]:
         """Return (skill, confidence, all scores).

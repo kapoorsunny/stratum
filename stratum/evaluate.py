@@ -140,15 +140,59 @@ def _generate(model, tokenizer, prompt, system, device, max_new_tokens):
     return strip_think(raw)
 
 
+def _with_context(row, index, style, k, budget, allowed):
+    """Build the prompt for one test row under the chosen context arm."""
+    if style in ("none", None) or (index is None and style != "oracle"):
+        return row["prompt"]
+
+    from .context import build_prompt
+
+    if style == "oracle":
+        if index is None:
+            raise ValueError("The oracle arm needs an index to find the chunk in.")
+        want = row.get("source_chunk")
+        if not want:
+            return row["prompt"]
+        try:
+            i = index.ids.index(want)
+        except ValueError:
+            return row["prompt"]
+        return build_prompt(row["prompt"], [index._hit(i, 1.0, "oracle")],
+                            budget, style="chunks")
+
+    hits = index.search(row["prompt"], allowed=allowed, k=k)
+    inner = "sentences" if style == "sentences" else "chunks"
+    return build_prompt(row["prompt"], hits, budget, style=inner)
+
+
 def run_eval(model_dir: str, test_path: str, scorer: str = "contains",
              system: str | None = None, max_new_tokens: int = 256,
              verbose: bool = True, json_out: str | None = None,
-             baseline: str | None = None) -> dict:
+             baseline: str | None = None, context=None,
+             context_style: str = "none", context_k: int = 3,
+             context_budget: int = 2000, allowed=None) -> dict:
     """Score a model on a test set.
 
     Returns a report dict: {"mean", "n", "scorer", "per_skill", "results"} plus,
     when baseline is given, "baseline_mean" - the same test run against another
     model (usually the untrained base) so the comparison is one command.
+
+    context_style decides what, if anything, goes in the prompt beside the
+    question, and it exists so the question can be settled by measurement
+    rather than argument:
+
+      none       closed book, which is how strata are trained
+      oracle     the exact chunk the question was written from. The ceiling,
+                 and the one worth measuring first, because a model that
+                 cannot use the right chunk when handed it will not be
+                 rescued by a better retriever
+      chunks     what retrieval actually found
+      sentences  the same retrieved text cut to the sentences that share
+                 wording with the question
+
+    The chunks and sentences arms share one retrieval result on purpose, so
+    what varies between them is presentation only. Retrieving separately for
+    each would confound the two and make the comparison meaningless.
     """
     import torch
 
@@ -165,7 +209,9 @@ def run_eval(model_dir: str, test_path: str, scorer: str = "contains",
         model.to(device).eval()
         results = []
         for row in rows:
-            answer = _generate(model, tokenizer, row["prompt"], system, device,
+            prompt = _with_context(row, context, context_style, context_k,
+                                   context_budget, allowed)
+            answer = _generate(model, tokenizer, prompt, system, device,
                                max_new_tokens)
             s = score_fn(answer, row["expected"])
             results.append({"prompt": row["prompt"], "expected": row["expected"],

@@ -81,22 +81,43 @@ class SkillPool:
         elif verbose:
             print("No router - requests use the first stratum unless one is named.")
 
-    def pick(self, prompt: str, skill: str | None = None):
-        """Decide which skill answers. An explicit skill always wins over the
-        router, so a caller who knows what they want is never second-guessed."""
+    def pick(self, prompt: str, skill: str | None = None,
+             permitted: set | None = None):
+        """Decide which skill answers.
+
+        An explicit skill wins over the router, so a caller who knows what
+        they want is never second-guessed. What it cannot do is override
+        permission. Every path here chooses from `permitted` only, including
+        the router's answer and the fallback, because a fallback that
+        ignores permission is a hole with a friendly name.
+        """
+        choices = (self.names if permitted is None
+                   else [n for n in self.names if n in permitted])
+        if not choices:
+            raise PermissionError(
+                "No stratum on this server is permitted for this request.")
+
         if skill:
             if skill not in self.names:
                 raise ValueError(f"Unknown skill '{skill}'. "
                                  f"Available: {', '.join(self.names)}")
+            if skill not in choices:
+                # Refused rather than quietly rerouted. Silently answering
+                # from a different adapter would hide the denial.
+                raise PermissionError(
+                    f"Stratum '{skill}' is not permitted for this request.")
             return skill, 1.0, {}
+
         if self.router is None:
-            return self.names[0], 0.0, {}
+            return choices[0], 0.0, {}
         name, confidence, scores = self.router.route(prompt)
-        if name not in self.names:
-            return self.names[0], 0.0, scores
+        scores = {k: v for k, v in scores.items() if k in choices}
+        if name not in choices:
+            return choices[0], 0.0, scores
         return name, confidence, scores
 
     def generate(self, prompt: str, skill: str | None = None,
+                 permitted: set | None = None,
                  system: str | None = None, max_new_tokens: int = 400,
                  history: list[dict] | None = None) -> dict:
         """Answer one request with the skill that fits it."""
@@ -105,7 +126,7 @@ class SkillPool:
         from .data import format_messages, strip_think
         from .hf_utils import encode_for_generation
 
-        chosen, confidence, scores = self.pick(prompt, skill)
+        chosen, confidence, scores = self.pick(prompt, skill, permitted)
         self.model.set_adapter(chosen)
 
         messages = []
@@ -136,13 +157,21 @@ class SkillPool:
 
 
 def serve(pool: SkillPool, host: str = "127.0.0.1", port: int = 8927,
-          system: str | None = None) -> None:
+          system: str | None = None, index=None, policy=None,
+          context_style: str = "chunks", context_k: int = 3) -> None:
     """Expose the pool over an OpenAI-compatible HTTP API.
 
     Speaking that dialect is what makes the model usable from tools you
     already have - Claude Code, an IDE assistant, curl - without any of them
     needing to know STRATUM exists. Routing is reported back in the response
     so you can always see which skill answered.
+
+    With a policy, the caller names itself in an X-Stratum-Principal header
+    and sees only what that principal is allowed to see. That header is not
+    authentication and must never be treated as any, because anyone can set
+    it. It is where a real deployment puts the identity its own gateway has
+    already established, and the server says so on startup rather than
+    letting anyone assume otherwise.
     """
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -168,9 +197,25 @@ def serve(pool: SkillPool, host: str = "127.0.0.1", port: int = 8927,
 
         def do_GET(self):
             if self.path.rstrip("/") in ("/v1/models", "/models"):
+                # Listing every adapter and its card tells an unauthorised
+                # caller what compartments exist and what they were trained
+                # on, so the list is filtered exactly like everything else.
+                names = pool.names
+                if policy is not None:
+                    who = self.headers.get("X-Stratum-Principal")
+                    if not who:
+                        return self._send(400, {"error": {"message":
+                            "This server is running with an access policy, so "
+                            "every request must carry an X-Stratum-Principal "
+                            "header naming who is asking."}})
+                    try:
+                        may = set(policy.strata_for(who))
+                    except Exception as e:
+                        return self._send(403, {"error": {"message": str(e)}})
+                    names = [n for n in pool.names if n in may]
                 return self._send(200, {"object": "list", "data": [
                     {"id": n, "object": "model", "owned_by": "stratum",
-                     "stratum_card": pool.cards[n]} for n in pool.names]})
+                     "stratum_card": pool.cards[n]} for n in names]})
             if self.path.rstrip("/") in ("", "/health"):
                 return self._send(200, {"status": "ok", "base": pool.base_model,
                                         "skills": pool.names,
@@ -198,11 +243,52 @@ def serve(pool: SkillPool, host: str = "127.0.0.1", port: int = 8927,
                 asked = req.get("model")
                 skill = asked if asked in pool.names else None
 
-                result = pool.generate(
-                    user, skill=skill, system=sys_msg,
-                    max_new_tokens=int(req.get("max_tokens") or 400),
-                    history=history or None)
-                print(f"  {result['skill']:<20} conf {result['confidence']:.3f}  "
+                # Who is asking, and therefore what they may see. With no
+                # policy this stays None and nothing is filtered, which is
+                # the single machine case.
+                principal = self.headers.get("X-Stratum-Principal")
+                allowed = None
+                permitted = None
+                if policy is not None:
+                    if not principal:
+                        return self._send(400, {"error": {"message":
+                            "This server is running with an access policy, so "
+                            "every request must carry an X-Stratum-Principal "
+                            "header naming who is asking."}})
+                    try:
+                        allowed = policy.index_compartments(principal)
+                        # Which ADAPTERS this principal may invoke, which is
+                        # a different question from which chunks they may
+                        # see. Filtering retrieval and not this was a hole:
+                        # a caller could name a department adapter they had
+                        # no grant for and simply be handed it.
+                        permitted = set(policy.strata_for(principal))
+                    except Exception as e:
+                        return self._send(403, {"error": {"message": str(e)}})
+
+                prompt = user
+                sources = []
+                if index is not None:
+                    hits = index.search(user, allowed=allowed, k=context_k)
+                    if hits:
+                        from .context import build_prompt
+                        prompt = build_prompt(user, hits, style=context_style)
+                        sources = [{"source": h["source"],
+                                    "compartment": h["compartment"],
+                                    "how": h["how"]} for h in hits]
+
+                try:
+                    result = pool.generate(
+                        prompt, skill=skill, permitted=permitted,
+                        system=sys_msg,
+                        max_new_tokens=int(req.get("max_tokens") or 400),
+                        history=history or None)
+                except PermissionError as e:
+                    return self._send(403, {"error": {"message": str(e)}})
+                who = f"{principal} " if policy is not None else ""
+                print(f"  {who}{result['skill']:<20} "
+                      f"conf {result['confidence']:.3f}  "
+                      f"{len(sources)} source(s)  "
                       f"{result['tokens']} tok in {result['seconds']}s")
                 self._send(200, {
                     "id": f"stratum-{int(time.time()*1000)}",
@@ -218,7 +304,12 @@ def serve(pool: SkillPool, host: str = "127.0.0.1", port: int = 8927,
                     "stratum": {"skill": result["skill"],
                                 "confidence": result["confidence"],
                                 "scores": result["scores"],
-                                "seconds": result["seconds"]},
+                                "seconds": result["seconds"],
+                                # Every source that went into the answer, with
+                                # the compartment it came from. An answer
+                                # nobody can trace is one nobody can check.
+                                "principal": principal,
+                                "sources": sources},
                 })
             except Exception as e:
                 self._send(400, {"error": {"message": str(e),
@@ -228,6 +319,13 @@ def serve(pool: SkillPool, host: str = "127.0.0.1", port: int = 8927,
     print(f"\nServing {len(pool.names)} skills on http://{host}:{port}")
     print(f"  skills : {', '.join(pool.names)}")
     print(f"  base   : {pool.base_model}")
+    if index is not None:
+        print(f"  context: {index.meta['n']} chunks, style {context_style}")
+    if policy is not None:
+        print(f"  policy : {len(policy.principals)} principals. Every request "
+              f"must send X-Stratum-Principal.")
+        print(f"           That header is NOT authentication. Put this behind "
+              f"something that establishes identity and sets it.")
     print(f"\nPoint any OpenAI-compatible client at it:")
     print(f"  base URL  http://{host}:{port}/v1")
     print(f"  api key   any non-empty string")
