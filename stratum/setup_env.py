@@ -45,6 +45,7 @@ def machine_facts() -> dict:
         "mps_visible": False,
         "nvidia_present": False,
         "bitsandbytes": False,
+        "torchvision": False,
         "peft": None,
         "transformers": None,
         "compiler": None,
@@ -73,6 +74,12 @@ def machine_facts() -> dict:
     try:
         import bitsandbytes  # noqa: F401
         facts["bitsandbytes"] = True
+    except Exception:
+        pass
+
+    try:
+        import torchvision  # noqa: F401
+        facts["torchvision"] = True
     except Exception:
         pass
 
@@ -158,6 +165,20 @@ def plan_actions(facts: dict) -> list[dict]:
                 "cmd": [sys.executable, "-m", "pip", "install", "bitsandbytes"],
                 "key": "bitsandbytes",
             })
+
+    # Reading images needs torchvision, and without it the error names
+    # pytorch.org rather than the package, which sends people the wrong way.
+    if not facts["torchvision"] and facts["torch"] is not None:
+        cmd = [sys.executable, "-m", "pip", "install", "torchvision"]
+        if facts["torch_cuda_build"]:
+            cmd += ["--index-url", cuda_index_url()]
+        todo.append({
+            "why": "torchvision is missing, which is what image models need to "
+                   "read a picture. Ingesting a corpus that contains images "
+                   "fails without it.",
+            "cmd": cmd,
+            "key": "torchvision",
+        })
 
     return todo
 
