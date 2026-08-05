@@ -225,17 +225,47 @@ def test_generate_pairs_split_and_resume(corpus_dir, tmp_path):
     assert calls == []
 
 
-def test_generate_pairs_survives_bad_teacher(corpus_dir, tmp_path, monkeypatch):
+def test_a_teacher_that_never_works_stops_the_run(corpus_dir, tmp_path,
+                                                  monkeypatch):
+    """A run where every chunk failed must not look like one that worked.
+
+    It used to return quietly with an empty file, which then flowed on into
+    `stratum train` and produced a stratum trained on nothing.
+    """
     import time as time_mod
     monkeypatch.setattr(time_mod, "sleep", lambda s: None)
     out = tmp_path / "out"
     ingest(str(corpus_dir), str(out), verbose=False)
-    counts = generate_pairs(str(out / "chunks.jsonl"), "Ask.",
-                            lambda p: "I refuse to emit JSON",
+
+    with pytest.raises(ValueError, match="Every one of the"):
+        generate_pairs(str(out / "chunks.jsonl"), "Ask.",
+                       lambda p: "I refuse to emit JSON",
+                       str(tmp_path / "t.jsonl"), None,
+                       test_fraction=0.0, retries=2, verbose=False)
+
+
+def test_a_partly_failing_teacher_keeps_what_worked(corpus_dir, tmp_path,
+                                                    monkeypatch):
+    """Partial failure is survivable and must stay that way. Only a total
+    failure is fatal."""
+    import json as _json
+    import time as time_mod
+    monkeypatch.setattr(time_mod, "sleep", lambda s: None)
+    out = tmp_path / "out"
+    ingest(str(corpus_dir), str(out), verbose=False)
+
+    calls = {"n": 0}
+
+    def flaky(prompt):
+        calls["n"] += 1
+        if calls["n"] % 2:
+            return "no json here"
+        return _json.dumps([{"prompt": "q", "response": "a"}])
+
+    counts = generate_pairs(str(out / "chunks.jsonl"), "Ask.", flaky,
                             str(tmp_path / "t.jsonl"), None,
-                            test_fraction=0.0, retries=2, verbose=False)
-    assert counts["chunks_failed"] > 0
-    assert counts["train_pairs"] == 0
+                            test_fraction=0.0, retries=1, verbose=False)
+    assert counts["train_pairs"] > 0
 
 
 def test_parse_pairs_tolerates_messy_teachers():

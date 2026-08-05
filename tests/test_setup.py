@@ -14,8 +14,8 @@ def facts(**over):
         "os": "Linux", "arch": "x86_64", "python": "3.11.0",
         "apple_silicon": False, "torch": None, "torch_cuda_build": False,
         "cuda_visible": False, "mps_visible": False, "nvidia_present": False,
-        "bitsandbytes": False, "peft": None, "transformers": None,
-        "compiler": "cc",
+        "bitsandbytes": False, "torchvision": True, "peft": None,
+        "transformers": None, "compiler": "cc",
     }
     base.update(over)
     return base
@@ -134,3 +134,29 @@ def test_printing_survives_characters_a_console_cannot_draw(capsys):
         sys.stdout.flush()
     finally:
         sys.stdout = old
+
+
+def test_torchvision_is_installed_when_images_would_otherwise_fail():
+    """Without it, ingesting a corpus containing images dies with an error
+    that points at pytorch.org instead of naming the package."""
+    a = plan_actions(facts(torch="2.11.0", torchvision=False, peft="0.20.0",
+                           transformers="5.14.1"))
+
+    assert "torchvision" in keys(a)
+
+
+def test_torchvision_uses_the_cuda_index_on_a_cuda_machine():
+    """A CPU torchvision beside a CUDA torch is its own kind of broken."""
+    a = plan_actions(facts(torch="2.11.0+cu128", torch_cuda_build=True,
+                           torchvision=False, peft="0.20.0",
+                           transformers="5.14.1", bitsandbytes=True))
+
+    fix = [x for x in a if x["key"] == "torchvision"][0]
+    assert cuda_index_url() in fix["cmd"]
+
+
+def test_nothing_is_installed_for_torchvision_before_torch_exists():
+    """Installing it first would pull in whatever torch pip prefers, which is
+    how a machine ends up with the CPU build it did not ask for."""
+    a = plan_actions(facts(torch=None, torchvision=False))
+    assert "torchvision" not in keys(a)
