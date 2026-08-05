@@ -17,3 +17,6 @@ __pycache__/
 # editor noise
 .vscode/
 .idea/
+
+# Local editor and assistant settings
+.claude/

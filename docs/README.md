@@ -19,6 +19,8 @@ Read in order - written as a short book, zero prior knowledge assumed. A develop
 14. [From a corpus to a model](14-from-corpus-to-model.md)
 15. [Routing and serving](15-routing-and-serving.md)
 16. [What changed, and why](16-what-changed.md)
+17. [Access control and context](17-access-control-and-context.md)
+18. [Deploying at scale](18-deploying-at-scale.md)
 
 New here? Run `python scripts/demo_concepts.py` (needs only numpy), then read doc 0.
 

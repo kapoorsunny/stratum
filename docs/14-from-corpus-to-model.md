@@ -77,7 +77,7 @@ stratum corpus ingest --in /data/company-docs --out corpus/ \
 
 A **vision-language model** (VLM) is a model that reads images the way a language model reads text. Used as a teacher here, it writes down everything in each image - transcribed text, table contents, what a diagram shows - and that text flows through chunking and pair generation like any document. The extraction is cached per image hash, so the expensive vision pass is a one-time cost. API backends exist too (`--images anthropic`, `--images openai`, `--images gemini`) with the same warning as every API teacher: **every image is sent to that provider**, which for most regulated corpora is disqualifying - use the local model.
 
-**One boundary to be clear about with the client.** This route bakes the images' *content* into the training data, and it is the right call for "our knowledge includes what's in these diagrams." What it does not produce is a model that can *look at a new image* in production - the finished SLM is a text model. A model that sees images at inference time means fine-tuning a vision-language model, which is a different training pipeline (different model classes, image processing, memory profile) that STRATUM does not currently implement. It is a roadmap item, and considerably more work than a flag on the existing commands. If the client's use case requires image input at inference time, plan a VLM behind the same RAG layer and use STRATUM for the text skills beside it.
+**One boundary worth knowing.** The reading happens once, at build time. What ends up in the corpus is the text the vision model wrote, so what the images contain does reach the finished model, but the finished model cannot be shown a new picture later. It is a text model. Wanting image input at inference time means fine-tuning a vision-language model instead, which is a different pipeline with different model classes and a different memory profile, and STRATUM does not do it.
 
 ## Step 3 - pairs: a teacher writes the training data
 
@@ -142,7 +142,7 @@ evals:
 
 The edges of what this project covers, so nobody finds them mid-engagement:
 
-- **The retrieval stack** - index, embedding model, serving glue - is standard infrastructure STRATUM doesn't ship. It runs in the client's environment beside the model.
+- **The retrieval stack now ships.** `stratum context build` makes an index with vectors, a term index and links, filtered per principal, and `stratum serve --context` puts it in front of the model. [Doc 17](17-access-control-and-context.md) covers it. What is still yours is the identity gateway that decides who is asking.
 - **Compliance-grade PII handling** is the client's pipeline, run before ingest. `--redact` is a second net.
 - **Expert review of generated pairs** is not optional at enterprise stakes. Teachers write plausible pairs at scale, and a domain expert sampling them (the provenance fields say where each came from) is what turns plausible into trusted. Budget for it.
 - **A model that accepts images at inference time** means fine-tuning a VLM - still on the roadmap.
