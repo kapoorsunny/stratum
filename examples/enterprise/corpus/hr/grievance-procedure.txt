@@ -1,0 +1,14 @@
+SYNTHETIC TEST DATA - NOT REAL PERSONNEL DATA
+
+Grievance and disciplinary procedure, summary.
+
+Stage one is an informal discussion with the line manager, to be held within
+5 working days of the matter being raised. Stage two is a formal hearing
+with a manager not previously involved, within 10 working days, with the
+right to be accompanied.
+
+Stage three is an appeal to a director, within 10 working days of the stage
+two outcome. The director's decision concludes the internal process.
+
+Records of stage two and stage three are retained for 12 months and then
+destroyed, except where a sanction remains live.

@@ -1,0 +1,17 @@
+Equipment tag convention, published.
+
+Tags take the form of a letter group, a hyphen, and a number. The letter
+group names the equipment class and the number names the unit within an
+area.
+
+P   pump
+K   compressor
+E   heat exchanger
+V   vessel
+T   tower or column
+TX  transformer
+CB  circuit breaker
+
+The first digit of the number is the plant area. So P-4471 is a pump in area
+4. Tags are unique across the site and are never reused after an item is
+removed.

@@ -1,0 +1,12 @@
+Site glossary, published.
+
+HRSG, heat recovery steam generator. Recovers heat from gas turbine exhaust
+to raise steam.
+P and ID, piping and instrumentation diagram. The drawing that shows every
+line, valve and instrument in a process.
+LOTO, lockout tagout. The procedure for making equipment safe to work on.
+MOC, management of change. The process by which a modification is reviewed
+before it is made.
+TA, turnaround. A planned shutdown for inspection and maintenance.
+RCM, reliability centred maintenance. A method for deciding what maintenance
+is worth doing based on failure consequence.

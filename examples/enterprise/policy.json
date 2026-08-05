@@ -1,0 +1,71 @@
+{
+  "compartments": [
+    {
+      "name": "public",
+      "tier": "company",
+      "volatile": false,
+      "description": "Published standards, site glossary, tag conventions"
+    },
+    {
+      "name": "engineering",
+      "tier": "department",
+      "volatile": false,
+      "description": "Equipment manuals, design notes, plant diagrams and photographs"
+    },
+    {
+      "name": "safety",
+      "tier": "department",
+      "volatile": false,
+      "description": "Hazard studies, integrity and inspection, operating procedures"
+    },
+    {
+      "name": "finance",
+      "tier": "restricted",
+      "volatile": false,
+      "description": "Contracts, commercial terms, capital plans, insurance position"
+    },
+    {
+      "name": "hr",
+      "tier": "restricted",
+      "volatile": true,
+      "description": "Pay bands, allowances and procedures, revised every year"
+    }
+  ],
+  "principals": [
+    {
+      "name": "contractor",
+      "compartments": ["public"],
+      "description": "Outside party on site, published material only"
+    },
+    {
+      "name": "engineer",
+      "compartments": ["public", "engineering"],
+      "description": "Rotating equipment engineer"
+    },
+    {
+      "name": "safety-officer",
+      "compartments": ["public", "safety"],
+      "description": "Process safety, hazard studies"
+    },
+    {
+      "name": "plant-manager",
+      "compartments": ["public", "engineering", "safety"],
+      "description": "Runs the site, needs both technical departments"
+    },
+    {
+      "name": "commercial-lead",
+      "compartments": ["public", "engineering", "finance"],
+      "description": "Contracts and vendor management, needs equipment context"
+    },
+    {
+      "name": "hr-lead",
+      "compartments": ["public", "hr"],
+      "description": "People matters only, no technical access"
+    },
+    {
+      "name": "executive",
+      "compartments": ["public", "engineering", "safety", "finance", "hr"],
+      "description": "Sees everything"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+SYNTHETIC TEST DATA - NOT REAL PERSONNEL DATA
+
+Shift allowance schedule, effective January 2026.
+
+Continental shift pattern attracts a 21 percent allowance on base salary.
+Night-only pattern attracts 27 percent. Standby, where an engineer is
+required to be reachable and within 60 minutes of site, is paid at 145 per
+day of standby regardless of whether a call is received.
+
+Callout beyond standby is paid at 1.5 times hourly rate with a minimum of
+four hours. The maximum consecutive standby period is 7 days.
+
+Allowances are reviewed each January and are not subject to individual
+negotiation.

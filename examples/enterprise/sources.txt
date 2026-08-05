@@ -1,0 +1,63 @@
+# Deep test corpus of 48 industrial energy engineering sources
+# Wikipedia pages are CC BY-SA and come from the clean HTML REST API
+
+# Generation and conversion
+https://en.wikipedia.org/api/rest_v1/page/html/Gas_turbine
+https://en.wikipedia.org/api/rest_v1/page/html/Steam_turbine
+https://en.wikipedia.org/api/rest_v1/page/html/Combined_cycle_power_plant
+https://en.wikipedia.org/api/rest_v1/page/html/Cogeneration
+https://en.wikipedia.org/api/rest_v1/page/html/Boiler
+https://en.wikipedia.org/api/rest_v1/page/html/Heat_recovery_steam_generator
+https://en.wikipedia.org/api/rest_v1/page/html/Nuclear_reactor
+https://en.wikipedia.org/api/rest_v1/page/html/Hydroelectricity
+https://en.wikipedia.org/api/rest_v1/page/html/Wind_turbine
+https://en.wikipedia.org/api/rest_v1/page/html/Solar_thermal_energy
+https://en.wikipedia.org/api/rest_v1/page/html/Photovoltaic_system
+https://en.wikipedia.org/api/rest_v1/page/html/Geothermal_power
+
+# Oil gas and petrochemical
+https://en.wikipedia.org/api/rest_v1/page/html/Oil_refinery
+https://en.wikipedia.org/api/rest_v1/page/html/Fractional_distillation
+https://en.wikipedia.org/api/rest_v1/page/html/Fluid_catalytic_cracking
+https://en.wikipedia.org/api/rest_v1/page/html/Hydrodesulfurization
+https://en.wikipedia.org/api/rest_v1/page/html/Liquefied_natural_gas
+https://en.wikipedia.org/api/rest_v1/page/html/Natural_gas_processing
+https://en.wikipedia.org/api/rest_v1/page/html/Petroleum_reservoir
+https://en.wikipedia.org/api/rest_v1/page/html/Enhanced_oil_recovery
+https://en.wikipedia.org/api/rest_v1/page/html/Drilling_rig
+https://en.wikipedia.org/api/rest_v1/page/html/Blowout_preventer
+https://en.wikipedia.org/api/rest_v1/page/html/Pipeline_transport
+https://en.wikipedia.org/api/rest_v1/page/html/Compressor_station
+
+# Electrical transmission and distribution
+https://en.wikipedia.org/api/rest_v1/page/html/Electrical_grid
+https://en.wikipedia.org/api/rest_v1/page/html/Electrical_substation
+https://en.wikipedia.org/api/rest_v1/page/html/Transformer
+https://en.wikipedia.org/api/rest_v1/page/html/Switchgear
+https://en.wikipedia.org/api/rest_v1/page/html/Circuit_breaker
+https://en.wikipedia.org/api/rest_v1/page/html/High-voltage_direct_current
+https://en.wikipedia.org/api/rest_v1/page/html/Electric_power_transmission
+https://en.wikipedia.org/api/rest_v1/page/html/Power_factor
+https://en.wikipedia.org/api/rest_v1/page/html/Base_load
+https://en.wikipedia.org/api/rest_v1/page/html/Grid_energy_storage
+
+# Rotating equipment and process plant
+https://en.wikipedia.org/api/rest_v1/page/html/Centrifugal_pump
+https://en.wikipedia.org/api/rest_v1/page/html/Centrifugal_compressor
+https://en.wikipedia.org/api/rest_v1/page/html/Heat_exchanger
+https://en.wikipedia.org/api/rest_v1/page/html/Cooling_tower
+https://en.wikipedia.org/api/rest_v1/page/html/Control_valve
+https://en.wikipedia.org/api/rest_v1/page/html/Pressure_vessel
+https://en.wikipedia.org/api/rest_v1/page/html/Relief_valve
+
+# Integrity, corrosion and safety
+https://en.wikipedia.org/api/rest_v1/page/html/Corrosion
+https://en.wikipedia.org/api/rest_v1/page/html/Cathodic_protection
+https://en.wikipedia.org/api/rest_v1/page/html/Nondestructive_testing
+https://en.wikipedia.org/api/rest_v1/page/html/Hazard_and_operability_study
+https://en.wikipedia.org/api/rest_v1/page/html/Process_safety_management
+https://en.wikipedia.org/api/rest_v1/page/html/Reliability-centered_maintenance
+https://en.wikipedia.org/api/rest_v1/page/html/Vibration
+
+# US EIA reports are public domain
+https://www.eia.gov/outlooks/aeo/pdf/AEO2023_Narrative.pdf

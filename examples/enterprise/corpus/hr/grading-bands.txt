@@ -1,0 +1,15 @@
+SYNTHETIC TEST DATA - NOT REAL PERSONNEL DATA
+
+Engineering grade bands, 2026.
+
+Grade E1, graduate engineer, band 38,000 to 46,000.
+Grade E2, engineer, band 46,000 to 58,000.
+Grade E3, senior engineer, band 58,000 to 74,000.
+Grade E4, principal engineer, band 74,000 to 95,000.
+Grade E5, engineering manager, band 92,000 to 121,000.
+
+Progression between bands requires a completed competency assessment and a
+role vacancy. Movement within a band is at manager discretion within the
+annual review budget, which for 2026 is 3.1 percent of paybill.
+
+This schedule changes annually and is withdrawn when superseded.

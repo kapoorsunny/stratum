@@ -1,0 +1,18 @@
+SYNTHETIC TEST DATA - NOT A REAL CONTRACT
+
+Commercial summary, maintenance framework agreement 2026.
+
+Vendor A holds the rotating equipment maintenance framework for the
+northern sites. The agreement is valued at 4.2 million per year and renews
+in March. Payment terms are net 45 with a 2 percent early settlement
+discount. Liquidated damages apply at 0.5 percent of monthly value per day
+of unplanned outage attributable to the contractor, capped at 10 percent of
+annual value.
+
+Vendor B holds the electrical inspection scope at 780 thousand per year on
+net 30 terms with no early settlement discount. This agreement expires in
+September and has not been retendered.
+
+Unit rates agreed for 2026: turbine borescope inspection 14,500 per unit,
+compressor overhaul 62,000 per unit, transformer oil analysis 480 per
+sample.
