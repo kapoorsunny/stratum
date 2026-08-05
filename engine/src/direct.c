@@ -89,18 +89,34 @@ void sm_direct_close(SmDirect *d)
 int64_t sm_direct_read(SmDirect *d, uint64_t off, void *buf, size_t len)
 {
     /* OVERLAPPED carries the offset, so nothing here depends on a shared
-     * file position and several of these could run at once. */
+     * file position and several of these can run at once.
+     *
+     * The event is not optional. With no event set, Windows signals
+     * completion on the FILE HANDLE itself, and one handle cannot signal
+     * for several reads at the same time. Sharing a handle across threads
+     * without this made most reads return nothing while the tool happily
+     * reported a throughput figure for the few that survived. */
     OVERLAPPED ov;
     memset(&ov, 0, sizeof ov);
     ov.Offset = (DWORD)(off & 0xFFFFFFFFull);
     ov.OffsetHigh = (DWORD)(off >> 32);
+    ov.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
+    if (!ov.hEvent) return -1;
 
     DWORD got = 0;
-    if (!ReadFile((HANDLE)d->handle, buf, (DWORD)len, &got, &ov)) {
-        if (GetLastError() != ERROR_IO_PENDING) return -1;
-        if (!GetOverlappedResult((HANDLE)d->handle, &ov, &got, TRUE)) return -1;
+    int64_t result;
+    if (ReadFile((HANDLE)d->handle, buf, (DWORD)len, &got, &ov)) {
+        result = (int64_t)got;
+    } else if (GetLastError() != ERROR_IO_PENDING) {
+        result = -1;
+    } else if (GetOverlappedResult((HANDLE)d->handle, &ov, &got, TRUE)) {
+        result = (int64_t)got;
+    } else {
+        result = -1;
     }
-    return (int64_t)got;
+
+    CloseHandle(ov.hEvent);
+    return result;
 }
 
 #else /* POSIX */

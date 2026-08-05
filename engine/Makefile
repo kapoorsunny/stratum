@@ -23,7 +23,7 @@ else
     EXE :=
 endif
 
-CORE_SRC := $(SRC)/map.c $(SRC)/gguf.c $(SRC)/direct.c
+CORE_SRC := $(SRC)/map.c $(SRC)/gguf.c $(SRC)/direct.c $(SRC)/thread.c
 CORE_OBJ := $(CORE_SRC:$(SRC)/%.c=$(BUILD)/%.o)
 
 TOOLS := stratum-bandwidth stratum-gguf

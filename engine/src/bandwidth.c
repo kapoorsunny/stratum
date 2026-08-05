@@ -1,27 +1,29 @@
 /* Measure what this machine's storage actually does.
  *
- * The whole argument for scheduling reads by expert rests on one claim, that
- * reading the same bytes in file order is much faster than reading them in
- * scattered order. That claim is either true on your drive or it is not, and
- * arithmetic cannot tell you which.
+ * Any argument about how to lay out an index or stream a checkpoint rests on
+ * a claim about the drive underneath it, and arithmetic cannot tell you
+ * whether that claim is true on yours.
  *
- * So this measures it. Three patterns over the same file, same total bytes,
- * same block size, so the only thing that differs is the order.
+ * So this measures it. Three patterns over the same file, the same total
+ * bytes, the same block size, so the only thing that differs is the order.
  *
- *   scattered   blocks in random order, which is what per token streaming does
- *   sorted      the same blocks in file order, which is what a batch does
- *   sequential  a straight sweep, the best the drive can do
+ *   scattered   blocks in random order, which is what per token streaming
+ *               and a graph walk both do
+ *   sorted      the same blocks in file order, which is what a batch can do
+ *   sequential  a straight sweep, the best the drive can manage
  *
- * If sorted lands near sequential, the idea is worth pursuing. If it lands
- * near scattered, the idea is dead and this saved you the work of finding
- * out slowly.
+ * Two things this measures that are easy to get wrong.
  *
- * Caches make this easy to get wrong. On a machine with plenty of memory a
- * second read of the same file comes back fifty times faster than the drive
- * can manage, and the number looks wonderful and means nothing. So the reads
- * here bypass the cache and go to the drive. Where the filesystem will not
- * allow that, the tool refuses to give a verdict rather than reporting a
- * figure it cannot stand behind.
+ * Caches. On a machine with plenty of memory, a second read of the same file
+ * comes back fifty times faster than any drive can manage, and the number
+ * looks wonderful and means nothing. The reads here bypass the cache. Where
+ * the filesystem will not allow that, the tool refuses to give a verdict
+ * rather than reporting a figure it cannot stand behind.
+ *
+ * Concurrency. A drive answers many reads at once far better than it answers
+ * them one at a time, so a measurement taken with a single read outstanding
+ * describes a laptop with one user and says nothing about a server with a
+ * hundred. --threads is how you see the difference.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,6 +37,7 @@
 
 #include "direct.h"
 #include "map.h"
+#include "thread.h"
 
 static double now_s(void)
 {
@@ -78,34 +81,77 @@ static void report(const Result *r)
            r->name, (double)r->bytes / 1e9, r->seconds, r->gb_per_s);
 }
 
-/* Read n_blocks blocks of block_bytes each, in the order given by idx.
- *
- * The reads go through the uncached path, so what is timed is the drive
- * rather than the operating system's memory. Every block lands in the same
- * buffer because the data is not wanted, only the time it took to fetch. */
-static Result run_pattern(const char *name, SmDirect *d, const uint64_t *idx,
-                          size_t n_blocks, size_t block_bytes, void *buf)
+/* One worker's slice. Each has its own buffer and its own run of the index
+ * array, so nothing is shared and no locking is needed. */
+typedef struct {
+    SmDirect *d;
+    const uint64_t *idx;
+    size_t first, count, block_bytes;
+    void *buf;
+    uint64_t got_total, asked, sink;
+} Slice;
+
+static void read_slice(void *p)
 {
-    uint64_t sink = 0;
-    uint64_t got_total = 0;
+    Slice *s = (Slice *)p;
+    for (size_t i = s->first; i < s->first + s->count; i++) {
+        const uint64_t off = s->idx[i] * (uint64_t)s->block_bytes;
+        if (off >= s->d->size) continue;
+        /* The tail of a file is almost never a whole block, and an unaligned
+         * length is rejected outright by uncached reads, so the last partial
+         * block is simply skipped. */
+        if (s->block_bytes > s->d->size - off) continue;
+        s->asked += s->block_bytes;
+        const int64_t got = sm_direct_read(s->d, off, s->buf, s->block_bytes);
+        if (got <= 0) continue;
+        s->got_total += (uint64_t)got;
+        s->sink += ((const unsigned char *)s->buf)[0];
+    }
+}
+
+static Result run_pattern(const char *name, SmDirect *d, const uint64_t *idx,
+                          size_t n_blocks, size_t block_bytes,
+                          void **bufs, int threads)
+{
+    Slice slices[SM_MAX_THREADS];
+    void *args[SM_MAX_THREADS];
+    if (threads < 1) threads = 1;
+    if (threads > SM_MAX_THREADS) threads = SM_MAX_THREADS;
+    if ((size_t)threads > n_blocks) threads = (int)n_blocks;
+
+    const size_t per = n_blocks / (size_t)threads;
+    for (int t = 0; t < threads; t++) {
+        slices[t].d = d;
+        slices[t].idx = idx;
+        slices[t].first = (size_t)t * per;
+        /* The last worker mops up the remainder so no block is dropped. */
+        slices[t].count = (t == threads - 1) ? n_blocks - (size_t)t * per : per;
+        slices[t].block_bytes = block_bytes;
+        slices[t].buf = bufs[t];
+        slices[t].got_total = 0;
+        slices[t].asked = 0;
+        slices[t].sink = 0;
+        args[t] = &slices[t];
+    }
 
     const double t0 = now_s();
-    for (size_t i = 0; i < n_blocks; i++) {
-        const uint64_t off = idx[i] * (uint64_t)block_bytes;
-        if (off >= d->size) continue;
-        size_t len = block_bytes;
-        if (len > d->size - off) {
-            /* The tail of the file is almost never a whole block, and an
-             * unaligned length is rejected outright by uncached reads, so
-             * the last partial block is simply skipped. */
-            continue;
-        }
-        const int64_t got = sm_direct_read(d, off, buf, len);
-        if (got <= 0) continue;
-        got_total += (uint64_t)got;
-        sink += ((const unsigned char *)buf)[0];
-    }
+    sm_run_parallel(read_slice, args, threads);
     const double dt = now_s() - t0;
+
+    uint64_t got_total = 0, asked = 0, sink = 0;
+    for (int t = 0; t < threads; t++) {
+        got_total += slices[t].got_total;
+        asked += slices[t].asked;
+        sink += slices[t].sink;
+    }
+
+    /* A read that quietly returned nothing would otherwise show up as
+     * excellent throughput over a small number of bytes. Saying so is the
+     * difference between a measurement and a number. */
+    if (asked && got_total < asked)
+        printf("  WARNING: %s got %.1f%% of the bytes it asked for, so this "
+               "figure is not trustworthy\n", name,
+               100.0 * (double)got_total / (double)asked);
 
     Result r;
     r.name = name;
@@ -129,16 +175,22 @@ static int cmp_u64(const void *a, const void *b)
 static void usage(void)
 {
     printf(
-"stratum-bandwidth - measure whether read ORDER matters on this machine\n"
+"stratum-bandwidth - measure how this machine's drive really behaves\n"
 "\n"
-"usage: stratum-bandwidth FILE [--block MB] [--read MB] [--seed N]\n"
+"usage: stratum-bandwidth FILE [--block MB] [--block-kb KB] [--read MB]\n"
+"                              [--threads N] [--seed N]\n"
 "\n"
-"  FILE      any large file. A model checkpoint is ideal because it is the\n"
-"            real thing, but any file bigger than memory works.\n"
-"  --block   size of each read, in MB. Default 16, which is about the size\n"
-"            of one expert in a large sparse model.\n"
-"  --read    how much to read in total, in MB. Default 4096.\n"
-"  --seed    makes the scattered order repeatable.\n"
+"  FILE        any large file. A model checkpoint is ideal because it is the\n"
+"              real thing, but any large file works.\n"
+"  --block     size of each read in MB. Default 16, about one expert in a\n"
+"              large sparse model.\n"
+"  --block-kb  the same in KB, for the small sizes a retrieval index reads\n"
+"              in. This is the range where the answer changes most.\n"
+"  --read      how much to read in total, in MB. Default 4096.\n"
+"  --threads   how many reads to have in flight at once. Default 1, which is\n"
+"              one user waiting. A server has many, and a drive answers many\n"
+"              at once far better than it answers them one by one.\n"
+"  --seed      makes the scattered order repeatable.\n"
 "\n"
 "Reads bypass the operating system cache, so this measures the drive rather\n"
 "than how fast the machine copies memory. Where that cannot be arranged the\n"
@@ -153,13 +205,18 @@ int main(int argc, char **argv)
     }
 
     const char *path = argv[1];
-    size_t block_mb = 16, read_mb = 4096;
+    size_t block_kb = 16 * 1024, read_mb = 4096;
+    int threads = 1;
 
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--block") && i + 1 < argc)
-            block_mb = (size_t)strtoull(argv[++i], NULL, 10);
+            block_kb = (size_t)strtoull(argv[++i], NULL, 10) * 1024;
+        else if (!strcmp(argv[i], "--block-kb") && i + 1 < argc)
+            block_kb = (size_t)strtoull(argv[++i], NULL, 10);
         else if (!strcmp(argv[i], "--read") && i + 1 < argc)
             read_mb = (size_t)strtoull(argv[++i], NULL, 10);
+        else if (!strcmp(argv[i], "--threads") && i + 1 < argc)
+            threads = (int)strtol(argv[++i], NULL, 10);
         else if (!strcmp(argv[i], "--seed") && i + 1 < argc)
             rng_state = strtoull(argv[++i], NULL, 10) | 1u;
         else {
@@ -167,7 +224,7 @@ int main(int argc, char **argv)
             return 1;
         }
     }
-    if (!block_mb || !read_mb) {
+    if (!block_kb || !read_mb) {
         fprintf(stderr, "--block and --read must be greater than zero\n");
         return 1;
     }
@@ -179,19 +236,19 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* Uncached reads insist on aligned offsets and lengths, so the block
-     * size is rounded up to something the drive will accept. */
-    size_t block_bytes = block_mb * 1024u * 1024u;
+    /* Uncached reads insist on aligned offsets and lengths, so the block size
+     * is rounded up to something the drive will accept. */
+    size_t block_bytes = block_kb * 1024u;
     if (block_bytes % d.alignment)
         block_bytes += d.alignment - (block_bytes % d.alignment);
 
     const size_t blocks_in_file = (size_t)(d.size / block_bytes);
     if (blocks_in_file < 8) {
         fprintf(stderr,
-                "%s is only %.2f GB, which is too small for a %zu MB block "
+                "%s is only %.2f GB, which is too small for a %zu KB block "
                 "size to say anything.\nUse a bigger file or a smaller "
                 "--block.\n",
-                path, (double)d.size / 1e9, block_mb);
+                path, (double)d.size / 1e9, block_kb);
         sm_direct_close(&d);
         return 1;
     }
@@ -203,24 +260,38 @@ int main(int argc, char **argv)
     printf("stratum-bandwidth\n");
     printf("  file       : %s\n", path);
     printf("  file size  : %.2f GB\n", (double)d.size / 1e9);
-    printf("  block      : %zu MB\n", block_bytes / (1024u * 1024u));
+    if (block_bytes >= 1024u * 1024u)
+        printf("  block      : %zu MB\n", block_bytes / (1024u * 1024u));
+    else
+        printf("  block      : %zu KB\n", block_bytes / 1024u);
     printf("  blocks read: %zu of %zu\n", n_blocks, blocks_in_file);
+    printf("  threads    : %d\n", threads);
     printf("  reads      : %s\n\n",
            d.uncached ? "uncached, so this measures the drive"
                       : "CACHED, so these numbers are not the drive");
     if (d.note[0]) printf("  note: %s\n\n", d.note);
 
-    /* The same blocks are used for the scattered and the sorted pass. That
-     * is the point of the whole exercise, so that the only difference
-     * between them is the order they are visited in. */
+    /* The same blocks are used for the scattered and the sorted pass. That is
+     * the point of the exercise, so that the only difference between them is
+     * the order they are visited in. */
     uint64_t *idx = (uint64_t *)malloc(n_blocks * sizeof *idx);
     uint64_t *sorted = (uint64_t *)malloc(n_blocks * sizeof *sorted);
     uint64_t *seq = (uint64_t *)malloc(n_blocks * sizeof *seq);
-    void *buf = sm_aligned_alloc(block_bytes, d.alignment);
-    if (!idx || !sorted || !seq || !buf) {
+
+    /* One buffer per thread, because they read at the same time and would
+     * otherwise be writing over each other. */
+    if (threads < 1) threads = 1;
+    if (threads > SM_MAX_THREADS) threads = SM_MAX_THREADS;
+    void *bufs[SM_MAX_THREADS];
+    int allocated = 0;
+    for (; allocated < threads; allocated++) {
+        bufs[allocated] = sm_aligned_alloc(block_bytes, d.alignment);
+        if (!bufs[allocated]) break;
+    }
+    if (!idx || !sorted || !seq || allocated < threads) {
         fprintf(stderr, "out of memory\n");
         free(idx); free(sorted); free(seq);
-        sm_aligned_free(buf);
+        for (int i = 0; i < allocated; i++) sm_aligned_free(bufs[i]);
         sm_direct_close(&d);
         return 1;
     }
@@ -233,14 +304,14 @@ int main(int argc, char **argv)
     qsort(sorted, n_blocks, sizeof *sorted, cmp_u64);
 
     /* Scattered runs first, because it is the pattern least helped by
-     * anything left over from an earlier pass. Sorted runs on the same
-     * blocks straight after, which if anything flatters scattered, so a win
-     * for sorted here is a real one. */
-    Result a = run_pattern("scattered", &d, idx, n_blocks, block_bytes, buf);
+     * anything left over from an earlier pass. Sorted runs on the same blocks
+     * straight after, which if anything flatters scattered, so a win for
+     * sorted here is a real one. */
+    Result a = run_pattern("scattered", &d, idx, n_blocks, block_bytes, bufs, threads);
     report(&a);
-    Result b = run_pattern("sorted", &d, sorted, n_blocks, block_bytes, buf);
+    Result b = run_pattern("sorted", &d, sorted, n_blocks, block_bytes, bufs, threads);
     report(&b);
-    Result c = run_pattern("sequential", &d, seq, n_blocks, block_bytes, buf);
+    Result c = run_pattern("sequential", &d, seq, n_blocks, block_bytes, bufs, threads);
     report(&c);
 
     printf("\n");
@@ -248,8 +319,8 @@ int main(int argc, char **argv)
     /* No consumer drive reads this fast. A number above this did not come
      * from storage at all, and reporting a verdict from it would be worse
      * than reporting nothing. The whole point of this tool is to replace an
-     * assumption with a measurement, so a measurement it cannot stand
-     * behind has to be refused out loud. */
+     * assumption with a measurement, so a measurement it cannot stand behind
+     * has to be refused out loud. */
     const double IMPOSSIBLE_GB_S = 15.0;
     const double fastest = a.gb_per_s > b.gb_per_s
                          ? (a.gb_per_s > c.gb_per_s ? a.gb_per_s : c.gb_per_s)
@@ -264,7 +335,7 @@ int main(int argc, char **argv)
         printf("  Use a file on the drive you actually want to measure, and "
                "one that is not\n  a copy the system is already holding.\n");
         free(idx); free(sorted); free(seq);
-        sm_aligned_free(buf);
+        for (int i = 0; i < allocated; i++) sm_aligned_free(bufs[i]);
         sm_direct_close(&d);
         return 2;
     }
@@ -281,8 +352,23 @@ int main(int argc, char **argv)
                    "which is worth knowing before building it.\n");
     }
 
+    /* The figure that decides how to lay anything out. Every read carries a
+     * fixed cost no matter how small it is, so the thing to minimise is the
+     * number of reads that must happen one after another, not their size. */
+    if (a.bytes && a.seconds > 0 && block_bytes) {
+        const uint64_t reads = a.bytes / block_bytes;
+        if (reads) {
+            printf("\n  each scattered read cost about %.0f microseconds, "
+                   "at %zu KB a time.\n",
+                   a.seconds * 1e6 / (double)reads, block_bytes / 1024u);
+            printf("  Try --block-kb 4 against --block-kb 256 to see how "
+                   "little of that is size,\n  and --threads 16 to see how "
+                   "much of it disappears under concurrency.\n");
+        }
+    }
+
     free(idx); free(sorted); free(seq);
-    sm_aligned_free(buf);
+    for (int i = 0; i < allocated; i++) sm_aligned_free(bufs[i]);
     sm_direct_close(&d);
     return 0;
 }
