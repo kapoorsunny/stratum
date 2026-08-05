@@ -330,8 +330,29 @@ def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def compartment_of(rel_path: str, default: str = "public") -> str:
+    """Which compartment a file belongs to, taken from its top folder.
+
+    Companies already sort documents by who may read them, into shares and
+    sites and folders. Reusing that is better than inventing a second
+    labelling scheme, because the one that already exists is the one that
+    somebody keeps up to date.
+
+        corpus/engineering/pump-manual.pdf   -> engineering
+        corpus/finance/contract-2026.docx    -> finance
+        corpus/readme.txt                    -> public
+
+    A file sitting loose at the top is public, and that is only a safe
+    default because `stratum access check` counts them and says so rather
+    than letting them pass quietly.
+    """
+    parts = Path(rel_path).parts
+    return parts[0] if len(parts) > 1 else default
+
+
 def ingest(in_dir: str, out_dir: str, vision_teacher=None, redact_pii: bool = False,
-           chunk_size: int = 2400, overlap: int = 240, verbose: bool = True) -> dict:
+           chunk_size: int = 2400, overlap: int = 240,
+           compartments: bool = False, verbose: bool = True) -> dict:
     """Walk a corpus folder and produce chunks.jsonl plus a manifest.
 
     Every file's extracted text is cached under out_dir/cache keyed by the
@@ -436,14 +457,17 @@ def ingest(in_dir: str, out_dir: str, vision_teacher=None, redact_pii: bool = Fa
             pieces = chunk_text(text, chunk_size, overlap)
             entry["chunks"] = len(pieces)
             for start, piece in pieces:
-                chunks_file.write(json.dumps({
+                record = {
                     "id": _sha256_text(piece)[:16],
                     "text": piece,
                     "source": rel,
                     "source_sha256": sha,
                     "start_char": start,
                     "kind": entry["kind"],
-                }, ensure_ascii=False) + "\n")
+                }
+                if compartments:
+                    record["compartment"] = compartment_of(rel)
+                chunks_file.write(json.dumps(record, ensure_ascii=False) + "\n")
                 n_chunks += 1
             manifest.append(entry)
 
@@ -599,6 +623,8 @@ def generate_pairs(chunks_path: str, instruction: str, teacher_fn,
                    out_train: str, out_test: str | None = None,
                    per_chunk: int = 3, test_fraction: float = 0.1,
                    max_chunks: int | None = None, concurrency: int = 1,
+                   compartment: str | None = None, kind: str | None = None,
+                   teacher_by_kind: dict | None = None,
                    retries: int = 3, seed: int = 42, verbose: bool = True) -> dict:
     """Ask a teacher to write grounded pairs for every chunk.
 
@@ -612,12 +638,48 @@ def generate_pairs(chunks_path: str, instruction: str, teacher_fn,
     the chunk file - every source contributes, rather than the first N chunks
     all coming from whichever file sorts first. The sample is deterministic,
     so re-runs resume cleanly.
+
+    compartment restricts generation to one access compartment, which is how
+    a separate stratum gets trained per compartment. It matters more than a
+    convenience: a skill trained on two compartments at once cannot be given
+    to somebody who may only see one of them.
+
+    kind restricts generation to one sort of source, 'document' or 'image'.
+    Text pulled out of a diagram reads nothing like prose, so a skill trained
+    on both learns an average of two things.
+
+    teacher_by_kind overrides the teacher per kind, so the model that writes
+    training pairs about diagrams can be a different one from the model that
+    writes them about reports.
     """
     import math
 
     from .data import load_jsonl
 
     chunks = load_jsonl(chunks_path, required_keys=("id", "text", "source"))
+
+    # Filtering happens before sampling, so --max-chunks caps what is left
+    # rather than being spent on chunks that are then thrown away.
+    if compartment:
+        before = len(chunks)
+        chunks = [c for c in chunks if c.get("compartment") == compartment]
+        if verbose:
+            print(f"Compartment '{compartment}': {len(chunks)} of {before} chunks")
+        if not chunks:
+            raise ValueError(
+                f"No chunks are labelled compartment '{compartment}'. Either "
+                f"the name is wrong, or the corpus was ingested without "
+                f"--compartments.")
+    if kind:
+        before = len(chunks)
+        chunks = [c for c in chunks if c.get("kind") == kind]
+        if verbose:
+            print(f"Kind '{kind}': {len(chunks)} of {before} chunks")
+        if not chunks:
+            raise ValueError(
+                f"No chunks have kind '{kind}'. Kinds in this corpus come "
+                f"from ingest, and are 'document' or 'image'.")
+
     if max_chunks and len(chunks) > max_chunks:
         step = math.ceil(len(chunks) / max_chunks)
         chunks = chunks[::step]
@@ -666,9 +728,14 @@ def generate_pairs(chunks_path: str, instruction: str, teacher_fn,
         below."""
         prompt = PAIR_PROMPT.format(n=per_chunk, instruction=instruction,
                                     source=chunk["source"], chunk=chunk["text"])
+        # A per-kind teacher wins over the default one, so text lifted out of
+        # a diagram can be handled by a model chosen for that.
+        ask = teacher_fn
+        if teacher_by_kind:
+            ask = teacher_by_kind.get(chunk.get("kind"), teacher_fn)
         for attempt in range(retries):
             try:
-                return chunk, _parse_pairs(teacher_fn(prompt)), None
+                return chunk, _parse_pairs(ask(prompt)), None
             except Exception as e:
                 if attempt + 1 < retries:
                     time.sleep(2 ** attempt)
@@ -717,4 +784,16 @@ def generate_pairs(chunks_path: str, instruction: str, teacher_fn,
             print(f"WARNING: {counts['chunks_failed']} chunks failed after "
                   f"{retries} tries each. Re-run the same command to retry "
                   f"just those.")
+
+    # A run where nothing at all worked must not look like a run that
+    # succeeded. An empty training file flowing on into `stratum train` is a
+    # far worse outcome than stopping here and saying why.
+    if counts["chunks_failed"] and not counts["train_pairs"] \
+            and not counts["test_pairs"]:
+        raise ValueError(
+            f"Every one of the {counts['chunks_failed']} chunks failed and "
+            f"nothing was written.\n"
+            f" - Check the teacher answers at all, with --max-chunks 1.\n"
+            f" - `stratum teachers` shows which models this machine can run.")
+
     return counts

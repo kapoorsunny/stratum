@@ -49,9 +49,34 @@ def get_teacher(backend: str, model: str | None = None,
     if backend == "gemini":
         return _gemini_teacher(model or "gemini-2.5-flash")
     if backend == "echo":
-        return lambda prompt: "(echo teacher - replace with a real backend)"
+        return _echo_teacher()
     raise ValueError(f"Unknown teacher backend '{backend}'. "
                      f"Choose from: {', '.join(TEACHER_BACKENDS)}.")
+
+
+def _echo_teacher():
+    """A teacher that needs no model, so the pipeline can be run end to end.
+
+    It has to answer in the shape the caller expects. `corpus pairs` throws
+    away any answer that is not a JSON array of prompt and response objects,
+    while `teacher-gen` takes the answer verbatim. Returning prose to both
+    meant every chunk failed, three retries deep, and the run finished with
+    an empty file and a successful exit code.
+    """
+    import json
+    import re
+
+    filler = "(echo teacher - replace with a real backend)"
+
+    def teacher(prompt: str) -> str:
+        m = re.search(r"(\d+)\s+question", prompt)
+        if m:
+            n = max(1, int(m.group(1)))
+            return json.dumps([{"prompt": f"(echo question {i + 1})",
+                                "response": filler} for i in range(n)])
+        return filler
+
+    return teacher
 
 
 def _local_server_teacher(base_url: str, model_name: str | None):

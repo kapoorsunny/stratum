@@ -7,11 +7,9 @@ reads one image and writes down everything in it: transcribed text, table
 contents, what a diagram shows. That text then flows through the normal
 pipeline (chunks, pairs, strata) like any document.
 
-Be clear with the client about what this buys: the FINISHED model is still a
-text model. It knows what was IN the images at build time, but it cannot look
-at a new image at inference time - that needs a vision-language model, which
-is a different training pipeline and out of STRATUM's current scope (the
-roadmap note in docs/14 says so plainly).
+The reading happens once, at build time. What ends up in the corpus is the
+text this wrote, so the model that gets trained is a text model and cannot
+be shown a new picture later.
 
 Backends mirror stratum.teachers:
 
@@ -57,6 +55,34 @@ def get_vision_teacher(backend: str, model: str | None = None,
                      f"Choose from: hf, anthropic, openai, gemini, echo.")
 
 
+VISION_MAX_EDGE = 1024
+
+
+def _fit_for_vision(image, max_edge: int = VISION_MAX_EDGE):
+    """Shrink an oversized image before a local model has to look at it.
+
+    A vision model turns an image into tokens, and the count goes up with
+    the AREA. Doubling the width of a picture quadruples the work. A photo
+    straight from a phone or a full resolution diagram can therefore cost
+    more tokens than the entire document it was attached to, and on a laptop
+    card that is the difference between a few seconds and several minutes
+    per image. Measured here on one 960 pixel diagram, the difference was
+    over fifteen minutes against about thirty seconds.
+
+    A thousand pixels on the long edge is plenty to read a nameplate, a
+    label or an axis, which is what this is for. Anything already smaller is
+    left exactly as it is.
+    """
+    w, h = image.size
+    longest = max(w, h)
+    if longest <= max_edge:
+        return image
+    scale = max_edge / float(longest)
+    from PIL import Image as _Image
+    return image.resize((max(1, int(w * scale)), max(1, int(h * scale))),
+                        _Image.LANCZOS)
+
+
 def _hf_vision_teacher(model_name: str, instruction: str):
     """A local vision-language model. Images never leave the machine."""
     try:
@@ -78,6 +104,9 @@ def _hf_vision_teacher(model_name: str, instruction: str):
         raise RuntimeError(
             f"Could not load vision teacher '{model_name}'. Common causes:\n"
             f" - No internet, or the model id is misspelled.\n"
+            f" - torchvision is missing. Vision models need it to decode an "
+            f"image.\n"
+            f"   Run `stratum setup`, or `pip install torchvision`.\n"
             f" - Out of memory: pick a smaller vision model.\n"
             f"Original error: {e}"
         ) from e
@@ -88,6 +117,7 @@ def _hf_vision_teacher(model_name: str, instruction: str):
     def teacher(image_path: str) -> str:
         from PIL import Image
         image = Image.open(image_path).convert("RGB")
+        image = _fit_for_vision(image)
         messages = [{"role": "user", "content": [
             {"type": "image"},
             {"type": "text", "text": instruction},
