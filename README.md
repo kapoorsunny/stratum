@@ -140,6 +140,280 @@ Right to erasure falls out of the same rule. Deletion requests are nearly always
 
 ---
 
+## A real run, sixteen departments, one command
+
+Everything below actually ran. The corpus is public Wikipedia material so you can reproduce it exactly, and the plan file is [`examples/enterprise/plan.yaml`](examples/enterprise/plan.yaml).
+
+You describe your company once, in one file. Which departments exist, what material feeds each one, which cluster it belongs to, and who reads what.
+
+```yaml
+compartments:
+  engineering:
+    tier: department        # a group reads it, so it gets an adapter
+    family: technical       # which cluster carries its language
+    folders: [//fileserver/engineering]
+
+  payroll:
+    tier: restricted        # index only, never enters any weights
+    volatile: true
+    folders: [//fileserver/hr/pay]
+
+principals:
+  reliability_lead:
+    reads: [public, engineering, maintenance, quality, instrumentation, project_atlas]
+  contractor:
+    reads: [public]
+```
+
+Then one command turns that into a working, filtered, access proven system.
+
+```bash
+stratum corpus plan init --out plan.yaml     # a plan to edit
+stratum build --plan plan.yaml --work work/  # everything else
+```
+
+### What that command does
+
+```mermaid
+flowchart TD
+    Y[plan.yaml<br/>departments, clusters, people]
+
+    Y --> S1["1 read the plan<br/>refuse a broken one before<br/>anything is downloaded"]
+    S1 --> S2["2 lay out the corpus<br/>share drives, Word, PDF, slides<br/>spreadsheets, images, web"]
+    S2 --> POL[policy.json]
+    S2 --> FAM[families.json]
+    S2 --> S3["3 extract and chunk<br/>every row labelled with the<br/>compartment it came from"]
+    S3 --> S4["4 build the index<br/>vectors, terms and links"]
+    S4 --> S5["5 check the grouping<br/>how many adapters does<br/>any one person load"]
+    POL --> S5
+    FAM --> S5
+    S5 --> S6["6 attack the filter<br/>every person, every<br/>compartment they cannot read"]
+    S6 --> OUT[servable, and proven]
+
+    classDef src fill:#2d1a52,stroke:#1b1035,color:#fff
+    classDef mid fill:#7F77DD,stroke:#1b1035,color:#fff
+    classDef gate fill:#1D9E75,stroke:#1b1035,color:#fff
+    classDef out fill:#EF9F27,stroke:#1b1035,color:#1b1035
+    class Y,POL,FAM src
+    class S1,S2,S3,S4 mid
+    class S5,S6 gate
+    class OUT out
+```
+
+Each step prints the standalone command that does it alone, so the wrapper is a convenience rather than a place the pipeline hides.
+
+### What came out
+
+| | |
+|---|---|
+| Compartments, from 16 folders of documents | **16 departments** in 7 clusters |
+| People simulated, up to 5 departments plus a project each | **12 principals** |
+| Files in, one duplicate dropped, zero extraction errors | **122 in, 121 kept** |
+| Chunks out, every one labelled with its compartment | **2,502** |
+| Index over the lot, 46,732 terms and 30,024 links | **10.1 MB** |
+| Most adapters any single person has to load | **3**, inside the merge limit |
+| Access sweep, every person against every forbidden department | **576 queries, 0 leaks** |
+
+### The bit that matters
+
+The same question, asked by three different people, on the same index.
+
+> *"what are the terms for ending a supplier agreement early"*
+
+| Who they are | What came back |
+|---|---|
+| **counsel**, reads legal and procurement | contract management and vendor material, the actual answer |
+| **reliability_lead**, reads four technical departments | maintenance material only, never sees that procurement exists |
+| **contractor**, reads public only | public governance material, nothing else |
+
+Nobody was told they were being filtered. There is no refusal message to work around, because the forbidden rows were removed before ranking rather than after. A hidden chunk cannot even push a permitted one out of the results, which would leak through what is missing.
+
+### Two things the run found on its own
+
+**Two clusters do not share a readership.** `commercial` holds legal, procurement and sales, and the auditor reads legal but not the other two. The tool refuses to hand that person the cluster adapter and says why. They still get answers from legal, through retrieval instead. Nothing is lost except a little fluency, and the alternative would put language learned from material they are not cleared for inside a model they load.
+
+**The count of adapters per person is the number that decides whether this scales.** Merging more than about three adapters destroys the model. Sixteen departments where a person belongs to six of them still comes to three, because adapters follow how departments *write* and access stays in the index. Forty departments behave the same way.
+
+### Proving the proof works
+
+An access sweep that cannot fail proves nothing, so the test suite breaks the filter three ways on purpose and checks the sweep catches each one. A search that ignores the permitted set. A filter applied to ranking but dropped on link expansion, which is the subtle one. And an index that returns nothing at all, which leaks nothing and is reported as **INCONCLUSIVE** rather than as a pass.
+
+```bash
+stratum access simulate --index work/index --policy work/policy.json \
+                        --chunks work/chunks/chunks.jsonl
+```
+
+Full walkthrough with every command and its output in [Chapter 19](docs/19-a-real-enterprise-run.md).
+
+---
+
+## How a question actually gets answered
+
+Take an energy company. Priya is a rotating equipment engineer. She asks:
+
+> *"What is the certified bearing clearance on pump P-4471, and what are we paying Vendor A for maintenance?"*
+
+That question deliberately spans two things she has different rights to. Here is what happens.
+
+### Part one, what already exists before she asks
+
+This all happened at build time, weeks ago.
+
+**The company sorted its documents by who may read them.**
+
+```
+corpus/
+  public/        everyone
+  engineering/   the engineering department
+  safety/        the safety department
+  finance/       the finance team
+  hr/            HR only
+```
+
+They did not invent this. It is the share structure they already had. `corpus ingest --compartments` walked it and stamped every chunk with its folder, so each of the 1,115 chunks now carries a label saying which compartment it belongs to.
+
+**Someone wrote down who is who.** A policy file. Priya is `engineer`, and she may see `public` and `engineering`. It also records a **tier** per compartment, which decides *where that knowledge is allowed to live*:
+
+| Compartment | Tier | Consequence |
+|---|---|---|
+| public | company | trained into an adapter everyone loads |
+| engineering | department | trained into an adapter engineers load |
+| safety | department | trained into an adapter safety staff load |
+| finance | **restricted** | **never trained into anything. Index only** |
+| hr | **restricted** | **never trained into anything. Index only** |
+
+The finance and HR decision is the important one, and it is irreversible in the right direction. Their content never enters any set of weights, so there is no adapter anywhere that knows what Vendor A costs.
+
+**Three things got built.**
+
+*Adapters.* One per weights-tier compartment. `public`, `engineering`, `safety`. Each is a few megabytes trained on that compartment's documents alone. Finance and HR got none.
+
+*An index.* Every chunk from all five compartments, with a vector, its terms, and links to related chunks. The index holds everything, including finance and HR, because the index can be filtered at query time. Weights cannot.
+
+*A router.* Learned from the training questions, it knows which compartment a question is about.
+
+### Part two, the request
+
+**Step 1. Something else decides who she is.**
+
+Priya's request hits the company's identity proxy first. It checks her token, confirms she is who she says, looks her up, and sets a header:
+
+```
+X-Stratum-Principal: engineer
+```
+
+**STRATUM does not authenticate anyone.** It trusts that header completely, which is only safe because nothing can reach it except through the proxy. This is printed on the server's startup banner, because it is the thing people skip.
+
+**Step 2. The policy is consulted twice, for two different questions.**
+
+```
+policy.index_compartments("engineer")  ->  {public, engineering}
+policy.strata_for("engineer")          ->  {public, engineering}
+```
+
+These look the same here but they are not the same question. The first is *what may she read*. The second is *which adapters may she invoke*. For a finance manager they differ, because she may read finance documents but there is no finance adapter to invoke.
+
+Getting only the first one right was a real hole in this system, found by an adversarial review of this repo. Retrieval was filtered and adapter selection was not, so naming a department adapter simply handed it over.
+
+**Step 3. Retrieval, filtered before anything is scored.**
+
+The index turns Priya's question into a vector and scores it against all 1,115 chunks. Then:
+
+```
+mask = [chunk.compartment in {public, engineering} for every chunk]
+dense_scores[not mask]   = -infinity
+lexical_scores[not mask] = -infinity
+```
+
+The forbidden rows are knocked out **before** ranking, not after. This ordering is the whole thing. Rank first and filter after, and a finance chunk that scores highly takes a slot and then vanishes, so Priya gets four results where there should have been five, and the gap itself tells her something exists that she cannot see.
+
+Two rankings are produced, a semantic one and an exact-term one, combined by reciprocal rank fusion, which needs no tuning and does not care that the two scores are on different scales. The term index is what finds `P-4471` exactly. The vector is what understands "bearing clearance" when the document says "running fit tolerance".
+
+**Step 4. Links, checked on every hop.**
+
+The top hits can pull in chunks they are linked to, so a question about a pump reaches the maintenance procedure that governs it without naming it.
+
+**Every neighbour is permission checked individually.** Not the starting chunk, every hop. An unfiltered edge walks straight around step 3, silently, and it is the hole people leave open because they filter the search, feel finished, and then let expansion go wherever the graph goes.
+
+**Step 5. The prompt is assembled.**
+
+The surviving chunks go into the prompt, each carrying its source, with an instruction to say so if the material does not answer the question.
+
+What Priya's prompt contains: the engineering document with the pump specification.
+
+What it does not contain: anything from `finance/vendor-contract-summary.txt`. That chunk exists in the index, scored well on the second half of her question, and was eliminated at step 3 before it was ever ranked.
+
+**Step 6. Choosing which adapter answers.**
+
+The router reads her question and says `engineering`. That answer is then filtered against what she may invoke:
+
+```
+router says              ->  engineering
+permitted                ->  {public, engineering}
+engineering in permitted ->  use it
+```
+
+If the router had said `safety`, she would get `public` instead, not `safety`. If she had explicitly asked for `model: "safety"` in her request, she gets a **403**, not a quiet substitution, because silently answering from a different adapter would hide the denial.
+
+The base model is loaded once with all three adapters attached. Selecting one is a pointer change rather than a load, so this costs nothing measurable.
+
+**Step 7. Generation, and what comes back.**
+
+The `engineering` adapter answers. The response carries a block saying exactly what happened:
+
+```json
+"stratum": {
+  "principal": "engineer",
+  "skill": "engineering",
+  "confidence": 0.41,
+  "sources": [
+    {"source": "engineering/pumps.txt", "compartment": "engineering"},
+    {"source": "public/equipment-tag-convention.txt", "compartment": "public"}
+  ]
+}
+```
+
+Every source is traceable to a document, with the compartment it came from. An answer nobody can trace is an answer nobody can check.
+
+Priya gets her bearing clearance. She does not get the contract value, and cannot, by three independent mechanisms.
+
+### Why it holds, in three layers
+
+```
+Priya asks about the Vendor A contract
+        |
+        +-- Layer 1  the index knows the answer but never ranks it
+        |            filtered before scoring, so no displacement and no timing gap
+        |
+        +-- Layer 2  the links to it are checked on every hop
+        |            so she cannot arrive sideways from a chunk she can see
+        |
+        +-- Layer 3  no adapter she can load ever learned it
+                     finance is restricted tier, so it entered no weights at all
+```
+
+Layers one and two are query-time and could in principle be bugged. **Layer three cannot.** The knowledge is not in any parameter she has access to, so there is nothing to filter and nothing to trust.
+
+That is the reason for the tier system. A retrieval filter is a check you have to get right every time. A weight that was never trained is a fact that does not exist for her.
+
+### The same question, three people
+
+| Who | Gets the pump spec | Gets the contract value | Why |
+|---|---|---|---|
+| **contractor**, public only | no | no | Neither compartment is theirs |
+| **engineer**, Priya | **yes** | no | Engineering is hers, finance is not |
+| **commercial-lead**, public and engineering and finance | **yes** | **yes, from retrieval only** | May read finance, but loads no finance adapter, because there is not one |
+
+That last row is the interesting one. The commercial lead gets the contract value **as retrieved text in the prompt**, never as something the model knew. So when that contract is renegotiated next month, one row changes in the index and the answer is immediately correct. Nothing is retrained, and nothing stale was baked into a weight.
+
+### The honest caveats
+
+- **A small model will invent a figure when the context lacks one.** The prompt tells it to say it does not know, and a 1.7B model ignores that. Measured here, three models produced three confident and completely different numbers when the right chunk was missing. So retrieval quality is not a nicety, it is the line between an answer and a fabrication.
+- **Retrieval quality depends heavily on the embedder.** Asked in the documents' own words, the zero-dependency default finds things fine. Asked in a person's own words it missed the contract entirely, where a real embedding model put it first. That is 77.8% against 100% recall on the same held-out questions.
+- **Nothing logs what was retrieved for whom.** The response carries its sources but nothing writes them down. Capture that at your proxy if you need the record.
+
+---
+
 ## Quick start
 
 ```bash
@@ -174,6 +448,16 @@ Or run the whole build from one recipe, with its own pass or fail gates, so a fi
 stratum plan  examples/recipe.yaml   # will it fit here? if not, what will, and where to rent it
 stratum stack examples/recipe.yaml   # train everything, fuse, run the gates
 ```
+
+For a whole company rather than a couple of skills, describe it in one plan file and let one command do the rest. No GPU needed for any of this:
+
+```bash
+stratum corpus plan init  --out plan.yaml                # a plan to edit
+stratum corpus plan check --plan plan.yaml               # before downloading anything
+stratum build --plan plan.yaml --work work/              # corpus, index, grouping, proof
+```
+
+The last step ends by attacking its own access filter, so a run that finishes green has asked every person about every department they cannot read and got nothing back. [Chapter 19](docs/19-a-real-enterprise-run.md) is that run written down, sixteen departments, every command and its output.
 
 ---
 
@@ -236,6 +520,7 @@ Read in order, or jump to what you need. Zero prior knowledge assumed anywhere.
 | 16 | [What changed, and why](docs/16-what-changed.md) | Every command explained from zero, and what `engine/` is |
 | 17 | [Access control and context](docs/17-access-control-and-context.md) | Company data in a model, safely |
 | 18 | [Deploying at scale](docs/18-deploying-at-scale.md) | Laptop to a network of GPU machines |
+| 19 | [A real enterprise run](docs/19-a-real-enterprise-run.md) | Sixteen departments end to end, every command and its output |
 
 **Coming back to a version you have not used?** Start at [16](docs/16-what-changed.md). It stands alone and assumes nothing.
 
