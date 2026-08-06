@@ -26,8 +26,7 @@ from pathlib import Path
 
 
 def use_utf8_output() -> None:
-    """Make printing survive any character a model can produce.
-
+    """
     Windows still defaults its console to an eight bit code page, so the
     first time a model writes a Greek letter or a degree sign the print
     raises and takes the whole run with it. That is not a rare corner. A
@@ -150,8 +149,7 @@ def cmd_access_check(args):
 
 
 def cmd_access_plant(args):
-    """Put each compartment's canary into its training data.
-
+    """
     Run between generating pairs and training. Relying on the teacher to
     quote a planted document is not dependable, and a canary that never
     reaches the weights turns the audit into a test that passes for the
@@ -181,6 +179,24 @@ def cmd_access_plant(args):
                                         repeats=args.repeats)
     print(f"\nPlanted {total} canary pairs. Train, then run "
           f"`stratum access audit`.")
+
+
+def cmd_access_simulate(args):
+    """Ask every principal about every compartment and check what comes back."""
+    from .simulate import SimulationError, run, save
+
+    try:
+        report = run(args.index, args.policy, args.chunks, k=args.k,
+                     expand=args.expand, samples=args.samples, seed=args.seed)
+    except (SimulationError, FileNotFoundError, ValueError) as e:
+        sys.exit(str(e))
+
+    if args.out:
+        save(report, args.out)
+        print()
+        print(f"Report -> {args.out}")
+    if not report["passed"]:
+        sys.exit(1)
 
 
 def cmd_access_audit(args):
@@ -328,6 +344,160 @@ def cmd_unpack(args):
     if args.run:
         import subprocess
         subprocess.run(cmd)
+
+
+def _load_centroids(args):
+    """One centroid per compartment, from the corpus or from the router.
+
+    The corpus works before anything is trained, which is when the grouping
+    has to be decided. The router is the better source once it exists,
+    because it is built from the questions people ask rather than from the
+    documents alone. Both produce the same kind of vector, so nothing that
+    consumes them needs to know which one it got.
+    """
+    from .families import FamilyError, centroids_from_chunks
+
+    if getattr(args, "chunks", None):
+        try:
+            return centroids_from_chunks(args.chunks)
+        except (FamilyError, FileNotFoundError, ValueError) as e:
+            sys.exit(str(e))
+    if not getattr(args, "router", None):
+        sys.exit("Give either --chunks, the ingested corpus, or --router, a "
+                 "router already trained over the compartments.")
+    from .router import SkillRouter
+    try:
+        return SkillRouter.load(args.router).centroids
+    except Exception as e:
+        sys.exit(f"Could not read the router at {args.router}: {e}")
+
+
+def cmd_family_init(args):
+    """Write a starting family file, one family per compartment, to edit."""
+    import json as _json
+
+    from .families import example_spec
+
+    spec = example_spec(_load_centroids(args))
+    _P = Path(args.out)
+    _P.parent.mkdir(parents=True, exist_ok=True)
+    _P.write_text(_json.dumps(spec, indent=2) + chr(10), encoding="utf-8")
+    print(f"Wrote {args.out} with {len(spec['families'])} compartments, each "
+          f"in a family of its own.")
+    print()
+    print("Group them by editing the file. A family is a set of compartments "
+          "that share")
+    print("enough language to be served by one adapter, for example")
+    print()
+    print('  "technical":  ["engineering", "maintenance", "quality"],')
+    print('  "commercial": ["sales", "legal", "procurement"]')
+    print()
+    print("Then check it with `stratum family plan --declare " + args.out + "`.")
+
+
+def cmd_family_plan(args):
+    """Group compartments into families, declared or measured."""
+    import json as _json
+
+    from .families import (FamilyError, adapters_per_person, cluster, cohesion,
+                           compare, declared, save_plan)
+
+    centroids = _load_centroids(args)
+
+    try:
+        if args.declare:
+            spec = _json.loads(Path(args.declare).read_text(encoding="utf-8"))
+            plan = declared(spec, centroids,
+                            allow_unlisted=args.allow_unlisted)
+            print()
+            compare(plan, centroids)
+        else:
+            plan = cluster(centroids, n_families=args.families,
+                           max_per_family=args.max_per_family)
+    except FamilyError as e:
+        sys.exit(str(e))
+    except FileNotFoundError:
+        sys.exit(f"No family file at {args.declare}. Write one with "
+                 f"`stratum family init`.")
+
+    print()
+    print("How tight each family is")
+    print("  a family whose members sit no closer to each other than to")
+    print("  outsiders is not a family, so the margin is what to look at")
+    marg = cohesion(centroids, plan["families"])
+    weak = []
+    for label, m in sorted(marg.items()):
+        flag = ""
+        if m["members"] > 1 and m["margin"] < args.min_margin:
+            flag = "   <- weak, consider splitting"
+            weak.append(label)
+        print(f"  {label:<20} within {m['within']:.3f}  outside "
+              f"{m['outside']:.3f}  margin {m['margin']:+.3f}{flag}")
+
+    if args.policy:
+        from .access import AccessError, Policy
+        from .families import audience_check
+        try:
+            policy = Policy.load(args.policy)
+        except AccessError as e:
+            sys.exit(str(e))
+
+        # Vocabulary similarity says nothing about who may read something,
+        # so a family can group compartments with different audiences and
+        # produce one adapter that reaches people entitled to only part of it.
+        aud = audience_check(plan, policy)
+        plan["audience"] = {"safe": aud["safe"],
+                            "mixed": [m["family"] for m in aud["mixed"]]}
+        if aud["mixed"]:
+            print()
+            print("Families whose members do not share a readership")
+            for m in aud["mixed"]:
+                print(f"  {m['family']:<20} {', '.join(m['members'])}")
+                for who, cannot in m["exposed"].items():
+                    print(f"      {who} would load material from "
+                          f"{', '.join(cannot)} that they cannot otherwise read")
+            print()
+            print("  These are only safe if the adapter carries language rather")
+            print("  than facts, which is what `stratum ground` is for and what")
+            print("  `stratum access audit` tests. Do not ship one until it has.")
+        print()
+        print("Adapters each principal would load")
+        per = adapters_per_person(plan, policy)
+        worst = 0
+        for name, d in per.items():
+            worst = max(worst, d["adapters"])
+            fams = ", ".join(d["families"]) or "none"
+            print(f"  {name:<18} sees {d['compartments']:>2} compartment(s), "
+                  f"loads {d['adapters']} adapter(s)   [{fams}]")
+        print()
+        if worst > 3:
+            print(f"  {worst} adapters for one person is past the safe merge "
+                  f"limit of about three.")
+            print("  Either allow more families, or fuse that combination "
+                  "with `stratum fuse`.")
+        else:
+            print(f"  Most any one person loads is {worst}, which is inside "
+                  f"the safe merge limit.")
+
+    plan["cohesion"] = marg
+    save_plan(plan, args.out)
+    print()
+    print(f"Plan -> {args.out}")
+    if weak:
+        sys.exit(1)
+
+
+def cmd_ground(args):
+    """Rewrite training pairs so each prompt carries its source material."""
+    from .grounded import GroundedError, ground_pairs
+    try:
+        ground_pairs(args.pairs, args.chunks, args.out,
+                     distractors=args.distractors,
+                     abstain_share=args.abstain_share,
+                     same_compartment=not args.allow_cross_compartment,
+                     seed=args.seed)
+    except (GroundedError, FileNotFoundError) as e:
+        sys.exit(str(e))
 
 
 def cmd_setup(args):
@@ -587,7 +757,137 @@ def cmd_corpus_fetch(args):
                  if l.strip()]
     if not urls:
         sys.exit("No URLs given. Pass them as arguments or with --urls-file.")
-    fetch_urls(urls, args.out)
+    fetch_urls(urls, args.out, pause=args.pause)
+
+
+def cmd_build(args):
+    """Plan, corpus, chunks, index, families, access sweep, in that order."""
+    from .pipeline import PipelineError, run
+
+    try:
+        result = run(args.plan, args.work, fetch=not args.no_fetch,
+                     pause=args.pause, images=args.images,
+                     vision_model=args.vision_model, embedder=args.embedder,
+                     embed_model=args.embed_model, samples=args.samples,
+                     k=args.k, expand=args.expand, force=args.force)
+    except PipelineError as e:
+        sys.exit(str(e))
+    if not result["ok"]:
+        sys.exit(1)
+
+
+def cmd_corpus_plan_init(args):
+    from .corpus_plan import PlanError, write_example
+    try:
+        write_example(args.out)
+    except PlanError as e:
+        sys.exit(str(e))
+
+
+def cmd_corpus_plan_check(args):
+    """Read the plan and say what it would build, without building it."""
+    from .corpus_plan import PlanError, check_policy, parse
+    try:
+        plan = parse(args.plan)
+    except PlanError as e:
+        sys.exit(str(e))
+
+    comps = plan["compartments"]
+    print(f"{len(comps)} compartment(s) in {len(plan['families'])} "
+          f"famil{'y' if len(plan['families']) == 1 else 'ies'}")
+    print()
+    print(f"  {'compartment':<18} {'family':<14} {'tier':<11} material")
+    for name, c in sorted(comps.items()):
+        onhand = sum(1 for f in c["folders"]
+                     for p in f.rglob("*") if p.is_file())
+        bits = []
+        if onhand:
+            bits.append(f"{onhand} file(s) on disk")
+        if c["urls"]:
+            bits.append(f"{len(c['urls'])} to download")
+        print(f"  {name:<18} {c['family']:<14} {c['tier']:<11} "
+              f"{', '.join(bits)}")
+
+    print()
+    print("Families")
+    for label, members in plan["families"].items():
+        print(f"  {label:<20} {', '.join(members)}")
+
+    partial = []
+    if plan["principals"]:
+        print()
+        print("Adapters each principal would load, if every family is trained")
+        for name, p in sorted(plan["principals"].items()):
+            fams = sorted({comps[c]["family"] for c in p["reads"]
+                           if comps[c]["tier"] != "restricted"})
+            # A family adapter is only usable by someone who may read every
+            # compartment in it. Anything else would hand them language
+            # learned from material they are not cleared for.
+            usable = [f for f in fams
+                      if all(m in p["reads"] for m in plan["families"][f])]
+            print(f"  {name:<18} reads {len(p['reads']):>2}, loads "
+                  f"{len(usable)} adapter(s)   [{', '.join(usable) or 'none'}]")
+            for f in sorted(set(fams) - set(usable)):
+                mine = sorted(c for c in plan["families"][f] if c in p["reads"])
+                theirs = sorted(c for c in plan["families"][f]
+                                if c not in p["reads"])
+                partial.append((name, f, mine, theirs))
+                print(f"  {'':<18} no {f} adapter, it also carries "
+                      f"{', '.join(theirs)}")
+                print(f"  {'':<18} so {', '.join(mine)} reaches this "
+                      f"principal through the index alone")
+        worst = 0
+        for name, p in sorted(plan["principals"].items()):
+            fams = {comps[c]["family"] for c in p["reads"]
+                    if comps[c]["tier"] != "restricted"}
+            worst = max(worst, sum(
+                1 for f in fams
+                if all(m in p["reads"] for m in plan["families"][f])))
+        print()
+        if worst > 3:
+            print(f"  Most any one person loads is {worst}, past the limit of "
+                  f"about three that merging survives.")
+            print("  Use fewer, broader families, or fuse the common "
+                  "combination with `stratum fuse`.")
+        else:
+            print(f"  Most any one person loads is {worst}, inside the safe "
+                  f"merge limit.")
+
+        if partial:
+            print()
+            print(f"{len(partial)} case(s) where a principal reads part of a "
+                  f"family but not all of it")
+            print("  Nothing is lost. Those compartments are still searched "
+                  "and still answered from,")
+            print("  the answer just comes from retrieval rather than from a "
+                  "trained adapter, which")
+            print("  reads a little less fluently. Handing over the adapter "
+                  "instead would give them")
+            print("  language learned from material they are not cleared for, "
+                  "and no filter can")
+            print("  take that back out of a weight.")
+            print("  To close a case, either grant the whole family, or move "
+                  "that compartment into")
+            print("  a family whose members share its audience.")
+
+    complaints = check_policy(plan)
+    print()
+    if complaints:
+        print("The access rules reject this plan.")
+        for c in complaints:
+            print(f"  {c}")
+        sys.exit(1)
+    print("The access policy this would produce is valid.")
+    print(f"Build it with `stratum corpus plan build --plan {args.plan} "
+          f"--out corpus`")
+
+
+def cmd_corpus_plan_build(args):
+    from .corpus_plan import PlanError, build
+    try:
+        build(args.plan, args.out, fetch=not args.no_fetch, pause=args.pause)
+    except PlanError as e:
+        sys.exit(str(e))
 
 
 def cmd_corpus_ingest(args):
@@ -842,6 +1142,27 @@ def main():
     acp.add_argument("--seed", type=int, default=0)
     acp.set_defaults(func=cmd_access_plant)
 
+    acs = acsub.add_parser(
+        "simulate",
+        help="ask every principal about every compartment and check nothing "
+             "forbidden comes back")
+    acs.add_argument("--index", required=True)
+    acs.add_argument("--policy", required=True)
+    acs.add_argument("--chunks", required=True,
+                     help="the corpus the index was built from. The queries "
+                          "are drawn out of it, so each one is asked in the "
+                          "vocabulary of the material it is testing for")
+    acs.add_argument("--k", type=int, default=8)
+    acs.add_argument("--expand", type=int, default=3,
+                     help="links followed out of each hit. A hop is a second "
+                          "chance to arrive somewhere forbidden, so this is "
+                          "part of the test rather than a setting to turn off")
+    acs.add_argument("--samples", type=int, default=3,
+                     help="queries drawn per compartment")
+    acs.add_argument("--seed", type=int, default=0)
+    acs.add_argument("--out", default=None, help="write the report as JSON")
+    acs.set_defaults(func=cmd_access_simulate)
+
     aca = acsub.add_parser("audit", help="plant canaries and try to leak them")
     aca.add_argument("policy")
     aca.add_argument("--index", help="context index to attack")
@@ -922,6 +1243,72 @@ def main():
     up.add_argument("--run", action="store_true",
                     help="serve it now rather than printing the command")
     up.set_defaults(func=cmd_unpack)
+
+    fm = sub.add_parser("family",
+                        help="group compartments by how similarly they are written")
+    fmsub = fm.add_subparsers(dest="family_cmd", required=True)
+    fmi = fmsub.add_parser("init",
+                           help="write a starting family file to edit by hand")
+    fmi.add_argument("--router",
+                     help="a router already trained over the "
+                          "compartments. Use --chunks instead if "
+                          "nothing is trained yet")
+    fmi.add_argument("--chunks",
+                     help="the ingested corpus, chunks.jsonl. Use this "
+                          "before anything is trained, which is when the "
+                          "grouping has to be decided")
+    fmi.add_argument("--out", default="families-spec.json")
+    fmi.set_defaults(func=cmd_family_init)
+
+    fmp = fmsub.add_parser("plan", help="build the grouping and check it")
+    fmp.add_argument("--router",
+                     help="a router already trained over the "
+                          "compartments. Better than --chunks once "
+                          "it exists, because it is built from the "
+                          "questions people ask")
+    fmp.add_argument("--chunks",
+                     help="the ingested corpus, chunks.jsonl. Use this "
+                          "before anything is trained, which is when the "
+                          "grouping has to be decided")
+    fmp.add_argument("--declare",
+                     help="a family file you wrote. With this the grouping "
+                          "comes from you and the measurement becomes a "
+                          "second opinion printed beside it")
+    fmp.add_argument("--allow-unlisted", action="store_true",
+                     help="let a compartment missing from the file have a "
+                          "family of its own rather than failing")
+    fmp.add_argument("--out", required=True)
+    fmp.add_argument("--policy",
+                     help="also report how many adapters each principal loads")
+    fmp.add_argument("--families", type=int, default=None,
+                     help="how many to make. Left out, it cuts where the "
+                          "cost of joining two groups jumps most")
+    fmp.add_argument("--max-per-family", type=int, default=8,
+                     help="a family larger than this is a bucket, not a family")
+    fmp.add_argument("--min-margin", type=float, default=0.02,
+                     help="a family whose members are no closer to each other "
+                          "than to outsiders is reported as weak")
+    fmp.set_defaults(func=cmd_family_plan)
+
+    gr = sub.add_parser("ground",
+                        help="put the source material into each training prompt")
+    gr.add_argument("--pairs", required=True, help="training JSONL to rewrite")
+    gr.add_argument("--chunks", required=True, help="the corpus it came from")
+    gr.add_argument("--out", required=True)
+    gr.add_argument("--distractors", type=int, default=3,
+                    help="passages beside the right one that do not hold the "
+                         "answer. Without these the model learns that the "
+                         "first passage is always correct")
+    gr.add_argument("--abstain-share", type=float, default=0.15,
+                    help="fraction where the source is removed, so declining "
+                         "becomes a trained behaviour rather than a hope")
+    gr.add_argument("--allow-cross-compartment", action="store_true",
+                    help="let distractors come from any compartment. Off by "
+                         "default, because a distractor from a compartment "
+                         "the reader cannot see puts forbidden text into "
+                         "training data others will load")
+    gr.add_argument("--seed", type=int, default=42)
+    gr.set_defaults(func=cmd_ground)
 
     t = sub.add_parser("train", help="train one stratum")
     t.add_argument("--skill", required=True)
@@ -1058,6 +1445,33 @@ def main():
     di.add_argument("--seed", type=int, default=42)
     di.set_defaults(func=cmd_distill)
 
+    bd = sub.add_parser(
+        "build",
+        help="one plan file to a filtered, searchable, access proven index")
+    bd.add_argument("--plan", required=True,
+                    help="the corpus plan. `stratum corpus plan init` writes "
+                         "one to edit")
+    bd.add_argument("--work", required=True,
+                    help="folder for everything this produces")
+    bd.add_argument("--no-fetch", action="store_true",
+                    help="gather local folders only, download nothing")
+    bd.add_argument("--pause", type=float, default=0.0,
+                    help="seconds between downloads")
+    bd.add_argument("--images", default=None,
+                    help="a vision teacher to read images with. Left out, "
+                         "images are skipped and said to be skipped")
+    bd.add_argument("--vision-model", default=None)
+    bd.add_argument("--embedder", choices=["hash", "hf"], default="hash",
+                    help="hash needs no download and works offline")
+    bd.add_argument("--embed-model", default=None)
+    bd.add_argument("--samples", type=int, default=3,
+                    help="queries per compartment in the access sweep")
+    bd.add_argument("--k", type=int, default=8)
+    bd.add_argument("--expand", type=int, default=3)
+    bd.add_argument("--force", action="store_true",
+                    help="redo every step even where the output is current")
+    bd.set_defaults(func=cmd_build)
+
     co = sub.add_parser("corpus", help="turn a folder of documents and images into training data")
     cosub = co.add_subparsers(dest="corpus_cmd", required=True)
 
@@ -1066,7 +1480,41 @@ def main():
     cf.add_argument("--urls-file", default=None,
                     help="text file with one URL per line (# comments allowed)")
     cf.add_argument("--out", required=True, help="folder to download into (re-run to resume)")
+    cf.add_argument("--pause", type=float, default=0.0,
+                    help="seconds to wait between downloads. Public sites "
+                         "answer a fast run with 429 and most of it fails, "
+                         "so try 0.5 if that happens")
     cf.set_defaults(func=cmd_corpus_fetch)
+
+    cpl = cosub.add_parser(
+        "plan",
+        help="one file saying which compartments exist, what feeds each one, "
+             "and which cluster it joins")
+    cplsub = cpl.add_subparsers(dest="plan_cmd", required=True)
+
+    cpi = cplsub.add_parser("init", help="write an example plan to edit")
+    cpi.add_argument("--out", default="corpus-plan.yaml")
+    cpi.set_defaults(func=cmd_corpus_plan_init)
+
+    cpc = cplsub.add_parser("check",
+                            help="say what the plan would build, and whether "
+                                 "the access rules allow it")
+    cpc.add_argument("--plan", required=True)
+    cpc.set_defaults(func=cmd_corpus_plan_check)
+
+    cpb = cplsub.add_parser("build",
+                            help="lay out the corpus, the access policy and "
+                                 "the family spec from the plan")
+    cpb.add_argument("--plan", required=True)
+    cpb.add_argument("--out", required=True,
+                     help="folder to build the corpus under. One sub folder "
+                          "per compartment, which is what ingest expects")
+    cpb.add_argument("--no-fetch", action="store_true",
+                     help="only gather the local folders, download nothing")
+    cpb.add_argument("--pause", type=float, default=0.0,
+                     help="seconds between downloads. The plan's own fetch "
+                          "setting wins over this if it has one")
+    cpb.set_defaults(func=cmd_corpus_plan_build)
 
     ci = cosub.add_parser("ingest", help="extract, deduplicate, and chunk a corpus folder")
     ci.add_argument("--in", dest="in_dir", required=True, help="folder of documents and images")

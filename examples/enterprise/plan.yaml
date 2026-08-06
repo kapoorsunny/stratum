@@ -1,0 +1,315 @@
+# A worked example at enterprise shape. Sixteen compartments, seven families,
+# twelve principals, and people who belong to several departments plus a
+# project at once.
+#
+# Everything here is public Wikipedia material, so anyone can run it and get
+# the same corpus. Swap the urls for folders pointing at your own share drive
+# and the rest of the pipeline does not change.
+#
+#   stratum corpus plan check --plan examples/enterprise/plan.yaml
+#   stratum corpus plan build --plan examples/enterprise/plan.yaml --out work/corpus
+#
+# tier says where material is allowed to live.
+#   company     everyone reads it, so it may enter shared weights
+#   department  a group reads it, so it gets an adapter of its own
+#   restricted  index only, it never enters any weights
+#
+# family says which adapter carries a compartment's language. Compartments
+# that are written alike share one, which is what keeps the number of
+# adapters a single person loads down near three, where merging still works.
+
+compartments:
+
+  # --- everyone ---------------------------------------------------------
+  public:
+    tier: company
+    family: general
+    description: Policy and governance that every employee may read
+    urls:
+      - https://en.wikipedia.org/api/rest_v1/page/html/Business_ethics
+      - https://en.wikipedia.org/api/rest_v1/page/html/Code_of_conduct
+      - https://en.wikipedia.org/api/rest_v1/page/html/Corporate_governance
+      - https://en.wikipedia.org/api/rest_v1/page/html/Internal_control
+      - https://en.wikipedia.org/api/rest_v1/page/html/Regulatory_compliance
+      - https://en.wikipedia.org/api/rest_v1/page/html/Risk_management
+      - https://en.wikipedia.org/api/rest_v1/page/html/Standard_operating_procedure
+
+  # --- family: technical ------------------------------------------------
+  engineering:
+    tier: department
+    family: technical
+    description: Rotating equipment and process plant
+    urls:
+      - https://en.wikipedia.org/api/rest_v1/page/html/Boiler
+      - https://en.wikipedia.org/api/rest_v1/page/html/Centrifugal_compressor
+      - https://en.wikipedia.org/api/rest_v1/page/html/Centrifugal_pump
+      - https://en.wikipedia.org/api/rest_v1/page/html/Cooling_tower
+      - https://en.wikipedia.org/api/rest_v1/page/html/Gas_turbine
+      - https://en.wikipedia.org/api/rest_v1/page/html/Heat_exchanger
+      - https://en.wikipedia.org/api/rest_v1/page/html/Pressure_vessel
+      - https://en.wikipedia.org/api/rest_v1/page/html/Steam_turbine
+
+  maintenance:
+    tier: department
+    family: technical
+    description: Inspection, repair and reliability
+    urls:
+      - https://en.wikipedia.org/api/rest_v1/page/html/Condition_monitoring
+      - https://en.wikipedia.org/api/rest_v1/page/html/Lubrication
+      - https://en.wikipedia.org/api/rest_v1/page/html/Predictive_maintenance
+      - https://en.wikipedia.org/api/rest_v1/page/html/Preventive_maintenance
+      - https://en.wikipedia.org/api/rest_v1/page/html/Reliability-centered_maintenance
+      - https://en.wikipedia.org/api/rest_v1/page/html/Root_cause_analysis
+      - https://en.wikipedia.org/api/rest_v1/page/html/Vibration
+
+  quality:
+    tier: department
+    family: technical
+    description: Inspection standards and process control
+    urls:
+      - https://en.wikipedia.org/api/rest_v1/page/html/Acceptance_sampling
+      - https://en.wikipedia.org/api/rest_v1/page/html/ISO_9000_family
+      - https://en.wikipedia.org/api/rest_v1/page/html/Quality_management_system
+      - https://en.wikipedia.org/api/rest_v1/page/html/Six_Sigma
+      - https://en.wikipedia.org/api/rest_v1/page/html/Statistical_process_control
+
+  instrumentation:
+    tier: department
+    family: technical
+    description: Control systems, sensors and field devices
+    urls:
+      - https://en.wikipedia.org/api/rest_v1/page/html/Control_valve
+      - https://en.wikipedia.org/api/rest_v1/page/html/Distributed_control_system
+      - https://en.wikipedia.org/api/rest_v1/page/html/Instrumentation
+      - https://en.wikipedia.org/api/rest_v1/page/html/Pressure_measurement
+      - https://en.wikipedia.org/api/rest_v1/page/html/Programmable_logic_controller
+      - https://en.wikipedia.org/api/rest_v1/page/html/SCADA
+      - https://en.wikipedia.org/api/rest_v1/page/html/Thermocouple
+
+  # --- family: operations -----------------------------------------------
+  logistics:
+    tier: department
+    family: operations
+    description: Freight, warehousing and the supply chain
+    urls:
+      - https://en.wikipedia.org/api/rest_v1/page/html/Cargo
+      - https://en.wikipedia.org/api/rest_v1/page/html/Containerization
+      - https://en.wikipedia.org/api/rest_v1/page/html/Distribution_(marketing)
+      - https://en.wikipedia.org/api/rest_v1/page/html/Freight_transport
+      - https://en.wikipedia.org/api/rest_v1/page/html/Intermodal_container
+      - https://en.wikipedia.org/api/rest_v1/page/html/Logistics
+      - https://en.wikipedia.org/api/rest_v1/page/html/Supply_chain_management
+      - https://en.wikipedia.org/api/rest_v1/page/html/Third-party_logistics
+      - https://en.wikipedia.org/api/rest_v1/page/html/Warehouse
+
+  production:
+    tier: department
+    family: operations
+    description: Manufacturing planning and the shop floor
+    urls:
+      - https://en.wikipedia.org/api/rest_v1/page/html/Assembly_line
+      - https://en.wikipedia.org/api/rest_v1/page/html/Bill_of_materials
+      - https://en.wikipedia.org/api/rest_v1/page/html/Capacity_planning
+      - https://en.wikipedia.org/api/rest_v1/page/html/Just-in-time_manufacturing
+      - https://en.wikipedia.org/api/rest_v1/page/html/Lean_manufacturing
+      - https://en.wikipedia.org/api/rest_v1/page/html/Manufacturing
+      - https://en.wikipedia.org/api/rest_v1/page/html/Production_planning
+
+  facilities:
+    tier: department
+    family: operations
+    description: Buildings, utilities and site services
+    urls:
+      - https://en.wikipedia.org/api/rest_v1/page/html/Building_information_modeling
+      - https://en.wikipedia.org/api/rest_v1/page/html/Facility_management
+      - https://en.wikipedia.org/api/rest_v1/page/html/Fire_sprinkler_system
+      - https://en.wikipedia.org/api/rest_v1/page/html/Heating,_ventilation,_and_air_conditioning
+      - https://en.wikipedia.org/api/rest_v1/page/html/Lighting
+      - https://en.wikipedia.org/api/rest_v1/page/html/Physical_security
+      - https://en.wikipedia.org/api/rest_v1/page/html/Uninterruptible_power_supply
+
+  # --- family: commercial -----------------------------------------------
+  legal:
+    tier: department
+    family: commercial
+    description: Contracts, disputes and intellectual property
+    urls:
+      - https://en.wikipedia.org/api/rest_v1/page/html/Arbitration
+      - https://en.wikipedia.org/api/rest_v1/page/html/Breach_of_contract
+      - https://en.wikipedia.org/api/rest_v1/page/html/Contract
+      - https://en.wikipedia.org/api/rest_v1/page/html/Force_majeure
+      - https://en.wikipedia.org/api/rest_v1/page/html/Indemnity
+      - https://en.wikipedia.org/api/rest_v1/page/html/Intellectual_property
+      - https://en.wikipedia.org/api/rest_v1/page/html/Legal_liability
+      - https://en.wikipedia.org/api/rest_v1/page/html/Non-disclosure_agreement
+      - https://en.wikipedia.org/api/rest_v1/page/html/Tort
+
+  procurement:
+    tier: department
+    family: commercial
+    description: Sourcing, tendering and supplier management
+    urls:
+      - https://en.wikipedia.org/api/rest_v1/page/html/Contract_management
+      - https://en.wikipedia.org/api/rest_v1/page/html/E-procurement
+      - https://en.wikipedia.org/api/rest_v1/page/html/Procurement
+      - https://en.wikipedia.org/api/rest_v1/page/html/Request_for_proposal
+      - https://en.wikipedia.org/api/rest_v1/page/html/Strategic_sourcing
+      - https://en.wikipedia.org/api/rest_v1/page/html/Supplier_relationship_management
+      - https://en.wikipedia.org/api/rest_v1/page/html/Supply_chain
+      - https://en.wikipedia.org/api/rest_v1/page/html/Vendor
+
+  sales:
+    tier: department
+    family: commercial
+    description: Customers, pricing and channels
+    urls:
+      - https://en.wikipedia.org/api/rest_v1/page/html/Advertising
+      - https://en.wikipedia.org/api/rest_v1/page/html/Customer_relationship_management
+      - https://en.wikipedia.org/api/rest_v1/page/html/Market_segmentation
+      - https://en.wikipedia.org/api/rest_v1/page/html/Pricing
+      - https://en.wikipedia.org/api/rest_v1/page/html/Pricing_strategies
+      - https://en.wikipedia.org/api/rest_v1/page/html/Retail
+      - https://en.wikipedia.org/api/rest_v1/page/html/Sales
+      - https://en.wikipedia.org/api/rest_v1/page/html/Sales_management
+      - https://en.wikipedia.org/api/rest_v1/page/html/Sales_promotion
+      - https://en.wikipedia.org/api/rest_v1/page/html/Wholesaling
+
+  # --- family: finance --------------------------------------------------
+  accounting:
+    tier: department
+    family: finance
+    description: Ledgers, reporting and audit
+    urls:
+      - https://en.wikipedia.org/api/rest_v1/page/html/Accounts_payable
+      - https://en.wikipedia.org/api/rest_v1/page/html/Audit
+      - https://en.wikipedia.org/api/rest_v1/page/html/Balance_sheet
+      - https://en.wikipedia.org/api/rest_v1/page/html/Depreciation
+      - https://en.wikipedia.org/api/rest_v1/page/html/Double-entry_bookkeeping
+      - https://en.wikipedia.org/api/rest_v1/page/html/Financial_accounting
+      - https://en.wikipedia.org/api/rest_v1/page/html/Financial_statement
+      - https://en.wikipedia.org/api/rest_v1/page/html/Income_statement
+      - https://en.wikipedia.org/api/rest_v1/page/html/Management_accounting
+
+  treasury:
+    tier: department
+    family: finance
+    description: Cash, funding and financial risk
+    urls:
+      - https://en.wikipedia.org/api/rest_v1/page/html/Cash_flow
+      - https://en.wikipedia.org/api/rest_v1/page/html/Credit_risk
+      - https://en.wikipedia.org/api/rest_v1/page/html/Financial_risk
+      - https://en.wikipedia.org/api/rest_v1/page/html/Foreign_exchange_market
+      - https://en.wikipedia.org/api/rest_v1/page/html/Foreign_exchange_risk
+      - https://en.wikipedia.org/api/rest_v1/page/html/Hedge_(finance)
+      - https://en.wikipedia.org/api/rest_v1/page/html/Liquidity_risk
+      - https://en.wikipedia.org/api/rest_v1/page/html/Treasury_management
+      - https://en.wikipedia.org/api/rest_v1/page/html/Working_capital
+
+  # --- family: people ---------------------------------------------------
+  hr:
+    tier: department
+    family: people
+    description: Hiring, benefits and workplace health
+    urls:
+      - https://en.wikipedia.org/api/rest_v1/page/html/Employee_benefits
+      - https://en.wikipedia.org/api/rest_v1/page/html/Human_resource_management
+      - https://en.wikipedia.org/api/rest_v1/page/html/Occupational_safety_and_health
+      - https://en.wikipedia.org/api/rest_v1/page/html/Performance_appraisal
+      - https://en.wikipedia.org/api/rest_v1/page/html/Recruitment
+      - https://en.wikipedia.org/api/rest_v1/page/html/Workplace_wellness
+
+  training:
+    tier: department
+    family: people
+    description: Competence, apprenticeships and course material
+    urls:
+      - https://en.wikipedia.org/api/rest_v1/page/html/Apprenticeship
+      - https://en.wikipedia.org/api/rest_v1/page/html/Educational_technology
+      - https://en.wikipedia.org/api/rest_v1/page/html/Instructional_design
+      - https://en.wikipedia.org/api/rest_v1/page/html/Learning_management_system
+      - https://en.wikipedia.org/api/rest_v1/page/html/Professional_development
+      - https://en.wikipedia.org/api/rest_v1/page/html/Training
+      - https://en.wikipedia.org/api/rest_v1/page/html/Vocational_education
+
+  # --- family: delivery -------------------------------------------------
+  # A project is a compartment like any other. People join one on top of
+  # their departments, which is the case that pushes an individual past the
+  # three adapter limit if the families are cut badly.
+  project_atlas:
+    tier: department
+    family: delivery
+    description: Cross functional plant upgrade, membership changes often
+    urls:
+      - https://en.wikipedia.org/api/rest_v1/page/html/Project_management
+      - https://en.wikipedia.org/api/rest_v1/page/html/Feasibility_study
+      - https://en.wikipedia.org/api/rest_v1/page/html/Critical_path_method
+      - https://en.wikipedia.org/api/rest_v1/page/html/Gantt_chart
+      - https://en.wikipedia.org/api/rest_v1/page/html/Work_breakdown_structure
+      - https://en.wikipedia.org/api/rest_v1/page/html/Earned_value_management
+      - https://en.wikipedia.org/api/rest_v1/page/html/Change_management
+
+  # --- restricted -------------------------------------------------------
+  # Named here to show the shape. Restricted material is searchable by the
+  # people cleared for it and never enters any adapter, so it can be changed
+  # or deleted the moment the source changes. Point it at your own folder.
+  # payroll:
+  #   tier: restricted
+  #   family: people
+  #   volatile: true
+  #   description: Changes weekly, index only
+  #   folders: [raw/payroll]
+
+# Who reads what. Nobody here reads more than five departments plus one
+# project, which is the shape a real organisation ends up with.
+principals:
+
+  reliability_lead:
+    description: Four technical departments plus the upgrade project
+    reads: [public, engineering, maintenance, quality, instrumentation, project_atlas]
+
+  plant_manager:
+    description: All of operations plus the upgrade project
+    reads: [public, logistics, production, facilities, project_atlas]
+
+  counsel:
+    reads: [public, legal, procurement, sales]
+
+  controller:
+    reads: [public, accounting, treasury]
+
+  hr_lead:
+    reads: [public, hr, training]
+
+  site_engineer:
+    reads: [public, engineering, maintenance, quality, instrumentation]
+
+  planner:
+    reads: [public, logistics, production, facilities]
+
+  buyer:
+    reads: [public, legal, procurement, sales, project_atlas]
+
+  trainer:
+    reads: [public, hr, training, project_atlas]
+
+  # This one is deliberately awkward. Five departments that cut across two
+  # families, so the operations adapter is not usable and logistics reaches
+  # this person through the index instead. `plan check` says so rather than
+  # quietly handing over an adapter trained on material they cannot read.
+  ops_director:
+    description: Technical plus one operations department, cuts across families
+    reads: [public, engineering, maintenance, quality, instrumentation, logistics]
+
+  auditor:
+    description: Reads widely across finance and commercial
+    reads: [public, accounting, treasury, legal]
+
+  contractor:
+    description: Outside the company, sees only what everyone sees
+    reads: [public]
+
+# Public sites refuse a fast run and answer with 429, which loses most of
+# the download while still looking like it worked. Half a second is enough.
+# This has nothing to do with a corpus that comes off your own share drive.
+fetch:
+  pause: 0.5

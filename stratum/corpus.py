@@ -60,7 +60,7 @@ def _filename_for(url: str, content_type: str) -> str:
 
 
 def fetch_urls(urls: list[str], out_dir: str, retries: int = 3,
-               verbose: bool = True) -> dict:
+               pause: float = 0.0, verbose: bool = True) -> dict:
     """Download a list of URLs into a folder ready for ingest.
 
     The acquisition step of the pipeline: give it the pages, reports, and
@@ -70,6 +70,12 @@ def fetch_urls(urls: list[str], out_dir: str, retries: int = 3,
     skips files already downloaded. Filenames come from the URL, with the
     extension corrected from the server's content type so ingest can
     dispatch the right extractor.
+
+    pause is a wait between downloads. Public sites answer a fast run with
+    429 Too Many Requests, and a run that trips that gets almost nothing
+    while still looking like it worked. Half a second is usually enough. A
+    server that sends Retry-After is obeyed regardless of this setting,
+    because it has told us what it wants.
     """
     import urllib.request
 
@@ -94,6 +100,9 @@ def fetch_urls(urls: list[str], out_dir: str, retries: int = 3,
                 print(f" already have {existing}")
             continue
 
+        if pause > 0 and counts["fetched"]:
+            time.sleep(pause)
+
         data = None
         error = None
         ctype = ""
@@ -108,6 +117,19 @@ def fetch_urls(urls: list[str], out_dir: str, retries: int = 3,
             except Exception as e:
                 error = e
                 wait = 2 ** attempt
+                # A server that says how long to wait knows better than the
+                # backoff does, so take its number when it gives one. Being
+                # told to wait is not the same failure as a broken link and
+                # backing off properly is what turns a 429 storm into a run
+                # that finishes.
+                after = getattr(e, "headers", None)
+                if after is not None:
+                    try:
+                        wait = max(wait, min(60, int(after.get("Retry-After", 0))))
+                    except (TypeError, ValueError):
+                        pass
+                if getattr(e, "code", None) == 429:
+                    wait = max(wait, 5)
                 if verbose:
                     print(f" {url}: {e} - retrying in {wait}s ({attempt + 1}/{retries})")
                 time.sleep(wait)
