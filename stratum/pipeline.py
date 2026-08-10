@@ -242,17 +242,30 @@ def run(plan_path: str, work_dir: str, fetch: bool = True, pause: float = 0.0,
         print(f"  access     {simulation}")
         print()
         if report["passed"]:
-            print("This is servable now. The base model plus the index "
-                  "already answers")
-            print("questions with the right material and the right filter, "
-                  "with no training")
-            print("at all, which is worth checking before spending a GPU on "
-                  "anything.")
+            print("What that proves, and what it does not")
             print()
-            print("  stratum context query --index " + str(index) +
+            print("  Proven. Retrieval and link expansion return nothing a "
+                  "person may not read.")
+            print("  Try it yourself with")
+            print("    stratum context query --index " + str(index) +
                   " --chunks " + str(chunks))
-            print("      --policy " + str(policy) +
+            print("        --policy " + str(policy) +
                   " --principal <name> \"your question\"")
+            print()
+            print("  Not proven, because no model has been trained yet. Once "
+                  "there are strata,")
+            print("  `stratum access audit` attacks the weights, which is a "
+                  "different surface")
+            print("  that fails differently.")
+            print()
+            print("  Not proven either way. Whether the model declines when "
+                  "the material does")
+            print("  not hold the answer. A filter that correctly returns "
+                  "nothing still leaves")
+            print("  a model free to invent, and an invented answer is not a "
+                  "leak but it is")
+            print("  still wrong. `stratum ground` trains that refusal in on "
+                  "purpose.")
             print()
             print("To train one adapter per family from here, write a recipe "
                   "and run")

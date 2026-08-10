@@ -39,7 +39,7 @@ Recipe shape (see examples/recipe.yaml):
     normalize: true                    # weights sum to 1 (safe for 3+ strata)
   evals:                               # optional - run after the merge,
     - test: examples/test-extract.jsonl  # making the recipe build AND test
-      scorer: json_field           # contains / exact / json_field / overlap
+      scorer: json_field           # contains / exact / json_field / overlap / refusal
       min_score: 0.6                   # the build fails below this
     - test: examples/test-classify.jsonl
       scorer: exact
@@ -54,10 +54,13 @@ TOP_KEYS = {"base_model", "output_model", "optimizer", "system", "load_4bit",
             "strata", "merge", "evals"}
 STRATUM_KEYS = {"name", "skill", "out", "rank", "epochs", "optimizer", "system",
                 "load_4bit", "lr", "adamw_lr", "batch_size", "grad_accum",
-                "max_len", "seed", "distill"}
+                "max_len", "seed", "distill", "ground"}
 DISTILL_KEYS = {"teacher", "temperature", "alpha", "teacher_4bit", "batch_size"}
+GROUND_KEYS = {"chunks", "out", "distractors", "abstain_share", "hard",
+               "same_compartment", "max_chars", "seed"}
 MERGE_KEYS = {"method", "weights", "density", "drop", "seed", "normalize"}
-EVAL_KEYS = {"test", "scorer", "min_score", "system"}
+EVAL_KEYS = {"test", "scorer", "min_score", "system", "require_support",
+             "min_overlap"}
 
 
 def _check_keys(given: dict, allowed: set, where: str):
@@ -101,6 +104,13 @@ def load_recipe(path: str) -> dict:
             _check_keys(st["distill"], DISTILL_KEYS, f"{where}.distill")
             if "teacher" not in st["distill"]:
                 raise ValueError(f"{where}.distill is missing required key 'teacher'.")
+        if "ground" in st:
+            _check_keys(st["ground"], GROUND_KEYS, f"{where}.ground")
+            if "chunks" not in st["ground"]:
+                raise ValueError(
+                    f"{where}.ground is missing required key 'chunks'. "
+                    f"Grounding rewrites each prompt to carry its source "
+                    f"material, so it needs the corpus that material is in.")
 
     merge = recipe.get("merge", {})
     _check_keys(merge, MERGE_KEYS, f"{path} merge")

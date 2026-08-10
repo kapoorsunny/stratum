@@ -495,7 +495,7 @@ def cmd_ground(args):
                      distractors=args.distractors,
                      abstain_share=args.abstain_share,
                      same_compartment=not args.allow_cross_compartment,
-                     seed=args.seed)
+                     hard=not args.random_distractors, seed=args.seed)
     except (GroundedError, FileNotFoundError) as e:
         sys.exit(str(e))
 
@@ -525,6 +525,15 @@ def cmd_doctor(args):
             rec = "Qwen3-1.7B, or 4B with 4-bit + short sequences."
         else:
             rec = "Qwen3-0.6B in bf16, 1.7B with 4-bit."
+        # How much of that card is actually free right now. The number above
+        # is what the card has, which is a different question from what a new
+        # run can get, and an earlier job left running is the usual reason
+        # they disagree.
+        from .resources import gpu_memory
+        for d in gpu_memory():
+            free = d["total_mb"] - d["used_mb"]
+            print(f"Free now: {free:,} of {d['total_mb']:,} MB")
+
         print(f"\nRecommended base: {rec}")
         try:
             import bitsandbytes  # noqa
@@ -569,8 +578,25 @@ def cmd_doctor(args):
         print("\nFix the library versions above before training - nothing "
               "that loads a model will run until then.")
         return
+    # Last, because it is the one line that explains a machine which passes
+    # every check above and still fails the next run for memory.
+    from .resources import summary_line
+    left = summary_line()
+    if left:
+        print()
+        print(left)
+
     print("\nTo check a specific build against this machine: "
           "`stratum plan recipe.yaml`")
+
+
+def cmd_free(args):
+    """Stop STRATUM's leftover processes and give their memory back."""
+    from .resources import release
+
+    report = release(dry_run=args.dry_run, gpu_only=args.gpu_only)
+    if report["survived"]:
+        sys.exit(1)
 
 
 def cmd_train(args):
@@ -610,7 +636,9 @@ def cmd_eval(args):
                       system=args.system, json_out=args.json_out,
                       baseline=args.baseline, context=index,
                       context_style=args.context_style,
-                      context_k=args.context_k, allowed=allowed)
+                      context_k=args.context_k, allowed=allowed,
+                      require_support=args.require_support,
+                      min_overlap=args.min_overlap)
     if args.min_score is not None and report["mean"] < args.min_score:
         sys.exit(f"FAIL: score {report['mean']:.1%} is below --min-score "
                  f"{args.min_score:.1%}.")
@@ -742,9 +770,17 @@ def cmd_serve(args):
     except Exception as e:
         sys.exit(str(e))
 
+    # Default on when there is material to check against, off when there is
+    # none, because with nothing retrieved every specific claim is unsupported
+    # and the server would refuse everything.
+    require_support = args.require_support
+    if require_support is None:
+        require_support = index is not None
+
     serve(pool, host=args.host, port=args.port, system=args.system,
           index=index, policy=policy, context_style=args.context_style,
-          context_k=args.context_k)
+          context_k=args.context_k, require_support=require_support,
+          min_overlap=args.min_overlap)
 
 
 def cmd_corpus_fetch(args):
@@ -995,8 +1031,18 @@ def _stratum_up_to_date(out_dir, skill, base, rank, epochs):
         return False
 
 
+def _grounded_name(path: str) -> str:
+    """Where a grounded copy of a skill file goes when the recipe does not say.
+
+    Beside the original with a marker in the name, so the two are never
+    confused for one another when somebody looks at the folder later.
+    """
+    p = Path(path)
+    return str(p.with_name(p.stem + "-grounded" + p.suffix))
+
+
 def cmd_stack(args):
-    """Run a whole build from a YAML recipe: train listed strata, then merge them."""
+    """Ground, train, merge and score a whole build from one YAML recipe."""
     from .recipe import load_recipe, stratum_setting
     from .merge import merge_strata
 
@@ -1024,6 +1070,33 @@ def cmd_stack(args):
             print(f"Warning: no GPU here, so this build will be very slow. "
                   f"For a training burst instead, "
                   f"{rental_advice(plan['base_params_b'])}\n")
+
+    # Grounding, before anything is trained. It belongs in the recipe rather
+    # than in a script beside it, because a stratum trained on the raw pairs
+    # by mistake is not a stratum that fails loudly. It is one that answers
+    # confidently from material it was never shown, and nothing downstream
+    # would say so.
+    for st in recipe["strata"]:
+        spec = st.get("ground")
+        if not spec:
+            continue
+        from .grounded import GroundedError, ground_pairs
+        raw = st["skill"]
+        grounded_path = spec.get("out") or _grounded_name(raw)
+        print(f"\n=== Grounding {st['name']} ===")
+        try:
+            ground_pairs(raw, spec["chunks"], grounded_path,
+                         distractors=spec.get("distractors", 3),
+                         abstain_share=spec.get("abstain_share", 0.15),
+                         same_compartment=spec.get("same_compartment", True),
+                         max_chars=spec.get("max_chars", 1200),
+                         hard=spec.get("hard", True),
+                         seed=spec.get("seed", 42))
+        except (GroundedError, FileNotFoundError, ValueError) as e:
+            sys.exit(f"Grounding {st['name']} failed: {e}")
+        # Training reads the grounded file from here on, so there is no path
+        # through this command that trains on the raw pairs.
+        st["skill"] = grounded_path
 
     base = recipe["base_model"]
     strata_dirs = []
@@ -1090,7 +1163,13 @@ def cmd_stack(args):
         for ev in recipe["evals"]:
             report = run_eval(recipe["output_model"], ev["test"],
                               scorer=ev.get("scorer", "contains"),
-                              system=ev.get("system", recipe.get("system")))
+                              system=ev.get("system", recipe.get("system")),
+                              # A gate that scores the raw model and a server
+                              # that applies the support check would be
+                              # measuring two different things, and the one
+                              # that passes would be the one nobody ships.
+                              require_support=ev.get("require_support", False),
+                              min_overlap=ev.get("min_overlap"))
             bar = ev.get("min_score")
             if bar is not None and report["mean"] < bar:
                 failures.append(f"{ev['test']}: {report['mean']:.1%} "
@@ -1307,6 +1386,12 @@ def main():
                          "default, because a distractor from a compartment "
                          "the reader cannot see puts forbidden text into "
                          "training data others will load")
+    gr.add_argument("--random-distractors", action="store_true",
+                    help="pick distractors at random rather than the most "
+                         "confusable ones. Random passages are visibly about "
+                         "something else, so a model learns to decline when "
+                         "the material looks unrelated, which is not the case "
+                         "that matters")
     gr.add_argument("--seed", type=int, default=42)
     gr.set_defaults(func=cmd_ground)
 
@@ -1349,9 +1434,21 @@ def main():
     e.add_argument("model")
     e.add_argument("--test", required=True)
     e.add_argument("--scorer", default="contains",
-                   choices=["contains", "exact", "json_field", "overlap"],
+                   choices=["contains", "exact", "json_field", "overlap",
+                            "refusal"],
                    help="contains/exact for short answers, json_field for "
-                        "extraction, overlap for free text that paraphrases")
+                        "extraction, overlap for free text that paraphrases, "
+                        "refusal for a grounded test set, where it scores "
+                        "whether the model declines exactly when the material "
+                        "does not hold the answer")
+    e.add_argument("--require-support", action="store_true",
+                   help="check every answer against the material it was given "
+                        "and replace unsupported ones with a refusal. The same "
+                        "check `stratum serve --require-support` applies, so "
+                        "the score is the behaviour that ships")
+    e.add_argument("--min-overlap", type=float, default=None,
+                   help="how much of an answer's content must appear in the "
+                        "material before it counts as coming from there")
     e.add_argument("--system", default=None)
     e.add_argument("--json-out", default=None,
                    help="write the full report as JSON here (for CI)")
@@ -1424,6 +1521,22 @@ def main():
                     help="access policy. With one, every request must carry an "
                          "X-Stratum-Principal header, and each principal sees "
                          "only their own compartments")
+    # On by default whenever there is material to check against. A safety
+    # control that has to be remembered is one that will be missing the first
+    # time somebody writes a new client, and this one only ever removes
+    # claims the retrieved passages do not carry.
+    sv.add_argument("--require-support", action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help="check every answer against the passages it was "
+                         "given and replace anything they do not carry with a "
+                         "refusal, before it leaves the server. On by default "
+                         "when --context is given. The reason is returned in "
+                         "the response so a front end can explain the refusal. "
+                         "Turn it off with --no-require-support")
+    sv.add_argument("--min-overlap", type=float, default=None,
+                    help="how much of an answer's content must appear in the "
+                         "retrieved material before it counts as coming from "
+                         "there. Lower is more permissive")
     sv.set_defaults(func=cmd_serve)
 
     di = sub.add_parser("distill", help="train a student stratum by imitating a teacher (logit distillation)")
@@ -1444,6 +1557,17 @@ def main():
                     help="load the frozen teacher in 4-bit to fit both models (NVIDIA GPU)")
     di.add_argument("--seed", type=int, default=42)
     di.set_defaults(func=cmd_distill)
+
+    fr = sub.add_parser(
+        "free",
+        help="release GPU and system memory that an earlier STRATUM run is "
+             "still holding")
+    fr.add_argument("--dry-run", action="store_true",
+                    help="list what is running and stop nothing")
+    fr.add_argument("--gpu-only", action="store_true",
+                    help="only processes the driver says are holding GPU "
+                         "memory, rather than every STRATUM process")
+    fr.set_defaults(func=cmd_free)
 
     bd = sub.add_parser(
         "build",
