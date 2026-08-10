@@ -274,6 +274,232 @@ All three are caught. Those tests are in `tests/test_simulate.py` and they are t
 
 ---
 
+## What that PASSED does not mean
+
+This matters more than the pass does, because a green tick read too widely is how people ship things they should not.
+
+**It covers retrieval only.** Ranking and link expansion. The run above trained no model at all, and `stratum build` stops before training on purpose, so there were no weights to test.
+
+**Weights are a separate surface that fails differently.** A filter over rows cannot help once a fact is inside a parameter, because the model does not look it up, it knows it. That surface is attacked by `stratum access audit`, which plants a canary in each compartment before training and then asks every person for every canary they should not reach.
+
+```bash
+stratum access audit policy.json --index index/ --chunks chunks/chunks.jsonl \
+                     --strata-dir strata/
+```
+
+On a five compartment build with three trained strata that reports
+
+```
+  index and links: 17 forbidden lookups attempted, 0 leak(s)
+  control: 5 canaries, 0 that nobody authorised could reach
+  model weights: 7 forbidden questions asked, 0 leak(s)
+    not tested on the weights: finance, hr (restricted, so never in any adapter)
+
+PASSED on index, links, model.
+NOT TESTED: model weights for finance, hr. An untested surface is not a clean one.
+```
+
+Note what it refuses to claim. Finance and hr are restricted, so they never entered any adapter, so asking the weights about them proves nothing and it says so rather than counting them as passes.
+
+**Neither sweep says anything about whether the model invents.** That is a third thing again, and the next section is what happened when it was actually checked.
+
+---
+
+## The failure both sweeps miss
+
+Both sweeps above passed. The model was then served with its index and its policy, and the same question asked as two different people.
+
+```bash
+stratum serve strata/engineering strata/public strata/safety \
+    --router router.json --context index/ --context-chunks chunks/chunks.jsonl \
+    --policy policy.json --port 8931
+```
+
+> *"What does our documentation say about centrifugal pump bearing inspection and clearance limits?"*
+
+**engineer**, who reads engineering. Retrieval returned `Centrifugal_pump.html`, and the answer came from it.
+
+**contractor**, who reads public only. Retrieval correctly returned nothing about pumps, only unrelated public energy material. The model answered anyway.
+
+> *"...the limits are 1.5 to 2.0 times the pump's rated discharge capacity."*
+
+That number does not exist anywhere in the corpus. It was invented.
+
+Read carefully what did and did not happen. **The access control held.** The contractor received no engineering material, on retrieval or from the weights. There was no leak, and both sweeps were right to pass.
+
+But instead of saying it did not know, the model produced a confident maintenance limit that somebody could act on. For a bearing clearance that is arguably worse than a refusal, because a refusal sends you to find the real document and a fabricated number does not.
+
+This is not a confidentiality failure. It is a truthfulness failure, and no access filter can fix it, because the filter did its job perfectly.
+
+### Why it happens
+
+The strata were trained closed book, on a question and an answer with no source material in the prompt. A model trained that way has no way to produce an answer except to have stored it, and it has never once seen an example where the correct response was to decline. So when retrieval hands it passages that do not contain the answer, it does the only thing it was ever taught to do, which is answer.
+
+### The fix, and how to check it worked
+
+`stratum ground` rewrites training pairs so each prompt carries its source material alongside passages that do not contain the answer, and on a set fraction of rows removes the source entirely so that the correct response becomes a refusal.
+
+```bash
+stratum ground --pairs data/engineering.jsonl --chunks chunks/chunks.jsonl \
+               --out data-grounded/engineering.jsonl
+```
+
+Three things change at once. The model learns context plus question to answer, which generalises, rather than question to answer, which can only be memorised. There is no gradient pressure to store the fact, because the fact is always readable, so what gets learned is the domain's language rather than its contents. And declining becomes a trained behaviour rather than a hope.
+
+Distractors stay inside each row's own compartment by default. A distractor pulled from a compartment the reader cannot see would put forbidden text into training data other people load, which is the exact failure the tiers exist to prevent.
+
+---
+
+## Measuring whether the fix worked
+
+Anecdotes do not settle this, so both sets of adapters were trained and scored on the same test set.
+
+Ground the test sets too. Measuring a grounded model on a closed book test set asks it questions shaped like nothing it was trained on, so the score would answer a different question from the one being asked. `--abstain-share 0.5` makes half the rows ones where the material was removed and the only honest answer is to decline.
+
+```bash
+stratum ground --pairs data/engineering-test.jsonl --chunks chunks/chunks.jsonl \
+               --out data-grounded/engineering-test.jsonl --abstain-share 0.5
+
+stratum eval strata/engineering \
+             --test data-grounded/engineering-test.jsonl --scorer refusal
+```
+
+The `refusal` scorer asks whether the model declined **exactly** when it should have. Both directions of wrong score zero, which matters, because counting refusals alone would give full marks to a model that declines everything and that is the least useful thing anybody could ship.
+
+Three strata, three epochs each on Qwen3-1.7B, 49 test cases of which 28 had no answer in the material.
+
+| | closed book | grounded |
+|---|---|---|
+| engineering, 22 cases | 36.4% | **72.7%** |
+| public, 18 cases | 55.6% | **61.1%** |
+| safety, 9 cases | 33.3% | **77.8%** |
+| **all 49 cases** | **42.9%** | **69.4%** |
+
+The mean is the least interesting part. The breakdown is where the finding is.
+
+| | closed book | grounded |
+|---|---|---|
+| Declined when the material held no answer | **0 of 28** | 15 of 28 |
+| Invented an answer instead | **28 of 28** | 13 of 28 |
+| Answered when the material did hold it | 21 of 21 | 19 of 21 |
+| Refused one it could have answered | 0 of 21 | 2 of 21 |
+
+**The closed book model invented an answer every single time.** Twenty eight opportunities to say it did not know, and it took none of them. That is not a tendency, it is the only behaviour it has, and it follows directly from how it was trained. A model shown nothing but questions with answers has never once seen declining be correct.
+
+**Grounding roughly halves it, and does not fix it.** Thirteen fabrications out of twenty eight is far better than twenty eight and nowhere near good enough to point a contractor at. It also introduced two over refusals, questions the model could have answered and declined anyway, which is the cost of teaching abstention and is exactly why the scorer counts it against you.
+
+Why it is only half. The training data was 14% abstention rows, three epochs, on a 1.7 billion parameter base. All three of those are dials. Raise `--abstain-share`, train longer, or use a larger base, then measure again with the same command.
+
+`stratum eval --scorer refusal` prints this breakdown itself rather than only the mean, because the mean of 42.9% for the closed book model looks survivable and 0 out of 28 does not.
+
+---
+
+## Getting invention to nothing
+
+Halving it is not an answer. A department cannot be told that the figure they were given is probably real.
+
+The thing to accept is that training will never finish this job. A language model continues text plausibly, and a plausible continuation of a question it cannot answer is an answer. Better training moves the rate. It does not create a rule.
+
+So the last step is not training. It is a check on the way out.
+
+```bash
+stratum serve strata/* --context index/ --context-chunks chunks/chunks.jsonl \
+                       --policy policy.json --require-support
+```
+
+The model writes an answer, and before anybody sees it, the answer is compared against the passages it was actually given. Anything those passages do not carry is replaced with the same refusal `stratum ground` trains, so a caller sees one behaviour whether the model declined or the check made it.
+
+It is on by default whenever there is an index to check against. A safety control that has to be remembered is one that will be missing the first time somebody writes a new client.
+
+### What it checks
+
+**A number that is not in the material.** The dangerous case and the easiest to be certain about. "The limits are 1.5 to 2.0 times rated discharge capacity" contains two figures that appear nowhere in what the asker was shown. A figure is either present in the source or it is not, so this is close to exact rather than a judgement. Numbers written as words are ignored, because "three reasons" is discourse rather than a measurement.
+
+**An equipment tag or standard number that is not in the material.** P-4471 and P4471 are treated as the same pump, or the check would fire on correct answers constantly.
+
+**An answer with almost nothing in common with the material.** This catches the version with no invented number, where the model restates the question and appends a reason of its own. Set low on purpose, because refusing a correct answer costs the same trust as passing a wrong one.
+
+Each refusal reports which rule fired and on what, in the `stratum.support` block of the response, so a front end can explain a refusal rather than showing a blank.
+
+### What it does to the numbers
+
+Same three strata, same 49 cases. The figure that matters to an enterprise is not a score, it is how many times somebody was handed a statement the material does not support.
+
+| | answers given | **statements delivered that the material does not carry** |
+|---|---|---|
+| closed book | 49 | **24 of 49, 49%** |
+| closed book, with the check | 25 | **0** |
+| grounded | 32 | 9 of 49, 18% |
+| **grounded, with the check** | 23 | **0** |
+
+And what it costs, counted on the 21 cases where the material did hold an answer.
+
+| | correct answers still delivered |
+|---|---|
+| closed book | 9 of 21, 43% |
+| closed book, with the check | 7 of 21, 33% |
+| grounded | 7 of 21, 33% |
+| **grounded, with the check** | **7 of 21, 33%** |
+
+Read the last two rows together. **On a grounded model the check costs nothing at all.** Seven correct answers with it and seven without, so everything it removed was an invention. On a closed book model it costs two, and both were answers whose figures were correct but appeared nowhere in the retrieved passage, which is to say correct but unverifiable. An enterprise that cannot show where a number came from is usually better off not stating it.
+
+Two of the cases the scorer counted against the check were worth looking at individually, because they show it working rather than failing.
+
+> *"The centrifugal compressor produces a pressure ratio of about 60:1."*
+> *"...patented on 1 May 2012 by the Dutch State Mine."*
+
+Both were scored as refusing a question that had an answer. Both were wrong. The first invents 60:1, the second dates a 1918 patent to 2012. The refusal scorer only knows whether the model declined, not whether what it would have said was true, so it counted two suppressed fabrications as failures. That is a limit of the metric worth knowing when reading any number in this chapter.
+
+### Where the zero stops being a zero
+
+It is zero on 49 cases against a check that catches invented figures, invented identifiers, and answers with nearly nothing in common with the source. It is not a proof.
+
+A fabricated qualitative claim assembled entirely from words that do appear in the passages will still pass. So will a correct quotation used to support a wrong conclusion. What this rules out is the class of failure that gets acted on, which is a specific number or identifier that came from nowhere.
+
+For more than that, the next step is an entailment check per sentence against the passages, which is what MiniCheck and similar small verifier models do at a cost worth paying for high risk material. That is not built here, and saying so is more useful than implying the problem is closed.
+
+### The bug that was teaching the model to invent
+
+Chasing why invention stayed at 13 of 28 turned up something worse than a tuning problem.
+
+`stratum ground` used to cut each source chunk at its first 1200 characters. Where the answer sat past the cut, the row still said the question was answerable. So the model was shown material that did not contain the answer, and rewarded for producing one anyway.
+
+That is not a bad training example. It is a worked example of inventing, in the file whose entire purpose is to teach the opposite. It affected 2 of 8 answerable rows in the engineering test set, and the same proportion of the training set.
+
+Three changes.
+
+**The window follows the answer.** The kept stretch of a chunk is now centred on where the answer's own terms appear, rather than being the opening. Numbers are held together while doing it, because splitting 0.418 into 0 and 418 throws away the single most useful term to search for.
+
+**A row that still cannot be answered becomes a decline row.** If even the best window does not carry the answer, the honest label is that declining is correct, because that is the truth of what the model is being shown.
+
+**The file checks itself.** After writing, every answerable row is re-read and its material tested for the answer. A set that would teach invention cannot now be trained on quietly.
+
+```
+  10 answerable, each with the source plus 3 passages that are not
+  12 where the source was removed, so the answer is to decline
+  checked, every answerable row's material really does carry its answer
+```
+
+Answerable rows in that test set went from 8 to 10, because two questions that were impossible are now genuinely answerable.
+
+### Making it finish on a real corpus
+
+The first version of the distractor ranking sorted every chunk in the corpus against every other chunk in its compartment. On eleven hundred chunks it had to be killed. A company with a hundred thousand would have concluded the tool does not work.
+
+It now ranks only the chunks that a training pair actually names, only inside the compartments being grounded, and takes the few neighbours it needs by partial selection instead of a full sort. One second, and a whole grounding run finishes in five.
+
+Worth stating as a rule rather than a fix. Anything in this pipeline that touches every chunk against every other chunk has to be checked at the size a real company has, not at the size of a test corpus, because the difference between those two is where a tool stops being usable.
+
+### Distractors, and a correction worth recording
+
+`stratum ground` picks the passages that sit beside the answer. Random ones make an abstention row easy in the wrong way, because the material is visibly about something else and a model can learn to decline whenever things look unrelated. That rule does not fire in the case that matters, where retrieval returns passages squarely on topic that happen not to contain the fact asked for.
+
+So the default is now the most confusable passages in the compartment rather than random ones, following Amiraz and others, *The Distracting Effect*, ACL 2025, who measured up to a 7.5% gain from exactly this, concentrated on the ungrounded cases. `--random-distractors` restores the old behaviour.
+
+Worth recording how that decision nearly went the other way. Two automated summaries of that paper stated the opposite conclusion, that hard distractors harm abstention. Both were confident and both were wrong, and the abstract settles it in one sentence. The design was almost changed on the strength of a fabricated summary of a paper about fabrication, which is the same failure this chapter is about, arriving through a different door.
+
+---
+
 ## What it looks like to a person
 
 Three people, one index, the same question.

@@ -4,9 +4,78 @@
 
 ---
 
+## Out of memory, on a machine that should have plenty
+
+Check this before touching any setting, because the usual cause is not the settings.
+
+```bash
+stratum free --dry-run
+```
+
+An earlier STRATUM run can still be alive and holding the card. A training run stopped with Ctrl-C, a server whose terminal was closed, a notebook that was never restarted. The process disappears from view and keeps its memory, and the next thing you start fails for memory on a machine that looks idle.
+
+On the laptop this was written on, six forgotten servers were holding the whole 8 GB card while a training run waited for memory that had already been paid for.
+
+```
+GPU 0  NVIDIA GeForce RTX 4070 Laptop GPU
+  7,933 of 8,188 MB in use (97%)
+System memory  38,928 of 137,031 MB in use (28%)
+
+5 STRATUM process(es) still running
+      pid  command      GPU MB    RAM MB  age
+    66964  train        on GPU     6,313  5m10s
+    63780  train             -        12  53m21s
+```
+
+Release them with `stratum free`. It stops children first, asks politely before insisting, and reports how much actually came back rather than assuming.
+
+Two things it will not do. It only ever touches processes whose command line runs STRATUM, so on a shared machine somebody else's job is safe. And it never touches the process it is running in or anything that process descends from, since freeing memory by killing yourself achieves nothing.
+
+`stratum doctor` says the same thing unprompted, and also prints how much of the card is free right now rather than only how large it is.
+
+Three platforms, three different pictures, and the command handles all of them.
+
+- **NVIDIA on Linux** reports how much each process holds.
+- **NVIDIA on Windows** names the processes on the card but answers `[N/A]` for their sizes, because the display driver runs in WDDM mode. The listing says `on GPU` rather than inventing a number, and releasing works exactly the same.
+- **Apple silicon** has no separate card. The GPU shares system memory, so the system memory figure is the one that matters and ending the process is what gives it back.
+
+If the card is full and `stratum free` finds nothing of ours, something else on the machine is holding it. The command says so rather than reporting a cheerful success, and `nvidia-smi` will name it.
+
+## The model states things that are not in the documents
+
+Turn on the support check, which is on by default whenever `--context` is given.
+
+```bash
+stratum serve strata/* --context index/ --context-chunks chunks/chunks.jsonl \
+                       --policy policy.json          # the check is already on
+```
+
+Every answer is compared against the passages it was given, and anything they do not carry becomes a refusal before it leaves the server. The reason comes back in the response so a front end can explain it:
+
+```json
+"support": {"supported": false, "reason": "number not in the material",
+            "bad_numbers": ["1.5", "2"]}
+```
+
+Measured on three trained strata over 49 cases, this took unsupported statements delivered from 24 to 0 for a closed book model and from 9 to 0 for a grounded one, and on the grounded model it cost no correct answers at all.
+
+If it refuses too much, `--min-overlap 0.2` is more permissive, and `--no-require-support` turns it off entirely. Before doing either, look at what it held back. On the run this was written from, two of the refusals that looked like over-caution were the check correctly suppressing a fabricated pressure ratio and a patent dated ninety-four years wrong.
+
+## Training data that teaches the model to invent
+
+Check the last line `stratum ground` prints.
+
+```
+  checked, every answerable row's material really does carry its answer
+```
+
+If it instead warns that rows still claim an answer the material does not carry, do not train on that file. A row that says a question is answerable while showing material without the answer is a worked example of inventing, and the model will learn it.
+
+This used to happen silently. Chunks were cut at their first 1200 characters, so any answer sitting past the cut disappeared while the row still claimed to be answerable. The window now follows the answer, and rows that still cannot be answered become decline rows instead.
+
 ## Out of memory during training
 
-First, `stratum plan recipe.yaml` - it estimates what each stratum needs on this machine and suggests the fix, or tells you honestly that the build belongs on rented hardware (doc 10). The levers, in the order to pull them:
+If the card really is free and training still runs out, `stratum plan recipe.yaml` estimates what each stratum needs on this machine and suggests the fix, or tells you honestly that the build belongs on rented hardware (doc 10). The levers, in the order to pull them:
 
 1. `--batch-size 1 --grad-accum 16` - same effective batch (doc 6), a fraction of the memory.
 2. Make sure 4-bit is on. It's the default on NVIDIA GPUs, but only if `bitsandbytes` is installed - `stratum doctor` tells you.

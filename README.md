@@ -243,7 +243,56 @@ stratum access simulate --index work/index --policy work/policy.json \
                         --chunks work/chunks/chunks.jsonl
 ```
 
-Full walkthrough with every command and its output in [Chapter 19](docs/19-a-real-enterprise-run.md).
+### What that pass does not cover
+
+Three surfaces, and they fail differently. A green tick on one is not a green tick on the others.
+
+| Surface | What tests it | What it means |
+|---|---|---|
+| Retrieval and links | `access simulate` | nobody is *returned* material they cannot read |
+| Model weights | `access audit` | nobody can be *told* a fact only their adapter learned |
+| Whether the model invents | `ground`, then ask it | a filter can be perfect and the model still make something up |
+
+The third one is the one people miss. Served with a real model, a contractor asked about pump bearing limits. Retrieval correctly gave them nothing, no leak on any surface, and the model answered anyway with an invented specification. That is not a confidentiality failure and no filter can fix it, because the filter did its job.
+
+### Answers the material does not support never leave the server
+
+Training reduces invention and never ends it. A language model continues text plausibly, and a plausible continuation of a question it cannot answer is an answer. So the last step is a check on the way out, not more training.
+
+```bash
+stratum serve strata/* --context index/ --policy policy.json   # the check is on by default
+```
+
+Every answer is compared against the passages it was actually given. An invented figure, an invented equipment tag, or an answer with almost nothing in common with the source is replaced by a refusal, with the reason returned in the response so a front end can explain it rather than showing a blank.
+
+Measured on three trained strata over 49 cases, counting how often somebody was handed a statement the material does not carry:
+
+| | answers given | **unsupported statements delivered** |
+|---|---|---|
+| closed book | 49 | **24 of 49** |
+| closed book, with the check | 25 | **0** |
+| grounded training | 32 | 9 of 49 |
+| **grounded, with the check** | 23 | **0** |
+
+And it is close to free. On the 21 cases where the material did hold an answer, the grounded model delivered 7 correct answers with the check and 7 without, so everything it removed was an invention.
+
+Honest about the limit: that is zero on 49 cases against a check that catches invented numbers, invented identifiers, and answers unrelated to the source. A wrong conclusion drawn from a correct quotation will still pass. What it rules out is the class of failure that gets acted on, which is a specific number that came from nowhere.
+
+### The training data was teaching it to invent
+
+Worth reading even if you never use this project, because the bug is easy to write and silent.
+
+`stratum ground` cut each source chunk at its first 1200 characters. Where the answer sat past that cut, the row still said the question was answerable. So the model was shown material without the answer and rewarded for producing one, which is a worked example of inventing sitting inside the file meant to teach the opposite. It hit 2 of 8 answerable rows.
+
+The kept window now follows the answer instead of taking the opening, rows that still cannot be answered become honest decline rows, and the file checks itself before you can train on it:
+
+```
+  10 answerable, each with the source plus 3 passages that are not
+  12 where the source was removed, so the answer is to decline
+  checked, every answerable row's material really does carry its answer
+```
+
+Full walkthrough with every command and its output, including that failure and the fix, in [Chapter 19](docs/19-a-real-enterprise-run.md).
 
 ---
 
@@ -425,6 +474,15 @@ stratum doctor    # and tells you what it found
 ```
 
 `stratum setup` knows a Mac from an NVIDIA box. On Apple silicon it knows the ordinary PyTorch wheel already uses the GPU and there is no CUDA-style download to hunt for, and that 4-bit compression will never work there at any version. On an NVIDIA machine it knows that `pip install --upgrade torch` silently leaves the CPU build in place, which is the single most common way this project fails for people.
+
+If a run ever fails for memory on a machine that should have plenty, an earlier STRATUM process is usually still alive and holding the card. `stratum doctor` says so, and this releases it:
+
+```bash
+stratum free --dry-run   # what is still running, and what it is holding
+stratum free             # stop it and give the memory back
+```
+
+It only touches processes that are running STRATUM, never anything else sharing the machine, and never itself. Works the same on an NVIDIA card, on Windows where the driver will not report per process sizes, and on Apple silicon where the GPU shares system memory.
 
 ```bash
 # understand it first, no GPU, about 20 seconds
