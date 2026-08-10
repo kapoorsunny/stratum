@@ -158,7 +158,9 @@ class SkillPool:
 
 def serve(pool: SkillPool, host: str = "127.0.0.1", port: int = 8927,
           system: str | None = None, index=None, policy=None,
-          context_style: str = "chunks", context_k: int = 3) -> None:
+          context_style: str = "chunks", context_k: int = 3,
+          require_support: bool = False,
+          min_overlap: float | None = None) -> None:
     """Expose the pool over an OpenAI-compatible HTTP API.
 
     Speaking that dialect is what makes the model usable from tools you
@@ -172,8 +174,19 @@ def serve(pool: SkillPool, host: str = "127.0.0.1", port: int = 8927,
     it. It is where a real deployment puts the identity its own gateway has
     already established, and the server says so on startup rather than
     letting anyone assume otherwise.
+
+    require_support checks every answer against the passages it was given and
+    replaces anything they do not carry with a refusal. It belongs here
+    rather than in the caller, because a control every client has to remember
+    to apply is a control that is missing the first time somebody writes a
+    new client. The reason is reported in the stratum block of the response
+    so a front end can explain a refusal instead of showing a blank.
     """
     from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    if min_overlap is None:
+        from .support import MIN_OVERLAP
+        min_overlap = MIN_OVERLAP
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
@@ -285,11 +298,28 @@ def serve(pool: SkillPool, host: str = "127.0.0.1", port: int = 8927,
                         history=history or None)
                 except PermissionError as e:
                     return self._send(403, {"error": {"message": str(e)}})
+
+                # The last line before an answer reaches a person. Training
+                # reduces invention and never ends it, so anything the
+                # retrieved material does not carry is replaced with the
+                # refusal here, on the way out, where it cannot be skipped by
+                # whichever client happens to be calling.
+                text = result["text"]
+                support = None
+                if require_support:
+                    from .support import gate
+                    material = "\n\n".join(h["text"] for h in hits) if index \
+                        and hits else ""
+                    text, support = gate(text, material, user,
+                                         min_overlap=min_overlap)
+
                 who = f"{principal} " if policy is not None else ""
+                held = "" if not support or support["supported"] else \
+                    f"  HELD BACK, {support['reason']}"
                 print(f"  {who}{result['skill']:<20} "
                       f"conf {result['confidence']:.3f}  "
                       f"{len(sources)} source(s)  "
-                      f"{result['tokens']} tok in {result['seconds']}s")
+                      f"{result['tokens']} tok in {result['seconds']}s{held}")
                 self._send(200, {
                     "id": f"stratum-{int(time.time()*1000)}",
                     "object": "chat.completion",
@@ -297,7 +327,7 @@ def serve(pool: SkillPool, host: str = "127.0.0.1", port: int = 8927,
                     "model": result["skill"],
                     "choices": [{"index": 0, "finish_reason": "stop",
                                  "message": {"role": "assistant",
-                                             "content": result["text"]}}],
+                                             "content": text}}],
                     "usage": {"completion_tokens": result["tokens"],
                               "prompt_tokens": 0,
                               "total_tokens": result["tokens"]},
@@ -309,7 +339,12 @@ def serve(pool: SkillPool, host: str = "127.0.0.1", port: int = 8927,
                                 # the compartment it came from. An answer
                                 # nobody can trace is one nobody can check.
                                 "principal": principal,
-                                "sources": sources},
+                                "sources": sources,
+                                # So a front end can show why an answer was
+                                # withheld rather than only that it was. A
+                                # refusal nobody can explain gets treated as
+                                # a fault and worked around.
+                                "support": support},
                 })
             except Exception as e:
                 self._send(400, {"error": {"message": str(e),
@@ -324,6 +359,14 @@ def serve(pool: SkillPool, host: str = "127.0.0.1", port: int = 8927,
     if policy is not None:
         print(f"  policy : {len(policy.principals)} principals. Every request "
               f"must send X-Stratum-Principal.")
+    if require_support:
+        print("  support: on. An answer the retrieved material does not carry "
+              "is replaced")
+        print("           with a refusal before it leaves this process.")
+    elif index is not None:
+        print("  support: OFF. The model may state things the retrieved "
+              "material does not")
+        print("           carry. Turn it on with --require-support.")
         print(f"           That header is NOT authentication. Put this behind "
               f"something that establishes identity and sets it.")
     print(f"\nPoint any OpenAI-compatible client at it:")

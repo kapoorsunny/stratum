@@ -122,8 +122,64 @@ def score_overlap(output: str, expected) -> float:
     return 2 * precision * recall / (precision + recall)
 
 
+def score_refusal(output: str, expected) -> float:
+    """Did the model decline exactly when it should have declined?
+
+    The scorer for a grounded test set, where some rows had their source
+    removed and the only honest answer is that the material does not contain
+    it. `stratum ground --abstain-share` makes those rows.
+
+    Both directions are failures and both score zero, which is the point of
+    doing it this way rather than counting refusals.
+
+      Expected an answer, refused. The model has become useless, which is the
+      real cost of overdoing abstention and the thing that would otherwise be
+      invisible behind a rising refusal rate.
+
+      Expected a refusal, answered. The model invented something. Measured on
+      a real build, a person with no access to engineering material was given
+      a fabricated bearing clearance, which no access filter can prevent
+      because the filter had already done its job correctly.
+
+    So a high score here means the model declines when it should and answers
+    when it should, and neither behaviour can be traded off against the other
+    to make the number look better.
+
+    It says nothing about whether the answers it does give are correct. Pair
+    it with `overlap` on the same test set, which is the other half.
+    """
+    from .grounded import is_refusal
+
+    should_refuse = is_refusal(str(expected))
+    did_refuse = is_refusal(output)
+    return 1.0 if should_refuse == did_refuse else 0.0
+
+
+def refusal_breakdown(results: list[dict]) -> dict:
+    """Split refusal scoring into the four things that can happen.
+
+    Two of them are right and two are wrong, and the two wrong ones need
+    opposite fixes. Inventing means more abstention rows in training.
+    Over refusing means fewer. A mean hides which one you have.
+    """
+    from .grounded import is_refusal
+
+    counts = {"declined": 0, "invented": 0, "answered": 0, "over_refused": 0}
+    for r in results:
+        should = is_refusal(str(r.get("expected", "")))
+        did = is_refusal(r.get("output", ""))
+        if should:
+            counts["declined" if did else "invented"] += 1
+        else:
+            counts["over_refused" if did else "answered"] += 1
+    counts["should_decline"] = counts["declined"] + counts["invented"]
+    counts["should_answer"] = counts["answered"] + counts["over_refused"]
+    return counts
+
+
 SCORERS = {"contains": score_contains, "exact": score_exact,
-           "json_field": score_json_field, "overlap": score_overlap}
+           "json_field": score_json_field, "overlap": score_overlap,
+           "refusal": score_refusal}
 
 
 def _generate(model, tokenizer, prompt, system, device, max_new_tokens):
@@ -170,7 +226,9 @@ def run_eval(model_dir: str, test_path: str, scorer: str = "contains",
              verbose: bool = True, json_out: str | None = None,
              baseline: str | None = None, context=None,
              context_style: str = "none", context_k: int = 3,
-             context_budget: int = 2000, allowed=None) -> dict:
+             context_budget: int = 2000, allowed=None,
+             require_support: bool = False,
+             min_overlap: float | None = None) -> dict:
     """Score a model on a test set.
 
     Returns a report dict: {"mean", "n", "scorer", "per_skill", "results"} plus,
@@ -193,9 +251,21 @@ def run_eval(model_dir: str, test_path: str, scorer: str = "contains",
     The chunks and sentences arms share one retrieval result on purpose, so
     what varies between them is presentation only. Retrieving separately for
     each would confound the two and make the comparison meaningless.
+
+    require_support runs every answer past the support check before scoring
+    it, replacing anything the material does not carry with a refusal. It is
+    the same call serving makes, so what is measured here is the behaviour
+    that ships rather than an estimate of it.
     """
     import torch
 
+    if min_overlap is None:
+        from .support import MIN_OVERLAP
+        min_overlap = MIN_OVERLAP
+
+    if min_overlap is None:
+        from .support import MIN_OVERLAP
+        min_overlap = MIN_OVERLAP
     if scorer not in SCORERS:
         raise ValueError(f"Unknown scorer '{scorer}'. Choose from {list(SCORERS)}.")
     score_fn = SCORERS[scorer]
@@ -231,6 +301,28 @@ def run_eval(model_dir: str, test_path: str, scorer: str = "contains",
     results = eval_one_model(model_dir)
     mean = sum(r["score"] for r in results) / len(results)
 
+    # The support gate, applied to what the model said before it is scored.
+    # This is the same call `stratum serve --require-support` makes, so the
+    # number measured here is the behaviour that ships rather than an
+    # estimate of it.
+    gated = {"held_back": 0, "reasons": {}}
+    if require_support:
+        from .support import gate, passages_from_prompt
+        for r in results:
+            passages = passages_from_prompt(r["prompt"])
+            question = r["prompt"].rsplit("Question:", 1)[-1].strip()
+            answer, why = gate(r["output"], passages, question,
+                               min_overlap=min_overlap)
+            if not why["supported"]:
+                gated["held_back"] += 1
+                gated["reasons"][why["reason"]] = \
+                    gated["reasons"].get(why["reason"], 0) + 1
+                r["output_before_gate"] = r["output"]
+                r["output"] = answer
+                r["gate"] = why
+            r["score"] = score_fn(r["output"], r["expected"])
+        mean = sum(r["score"] for r in results) / len(results) if results else 0.0
+
     per_skill = {}
     if any(r["skill"] for r in results):
         for r in results:
@@ -239,11 +331,83 @@ def run_eval(model_dir: str, test_path: str, scorer: str = "contains",
 
     report = {"model": model_dir, "test": test_path, "scorer": scorer,
               "n": len(results), "mean": mean, "per_skill": per_skill,
+              "require_support": require_support, "gated": gated,
               "results": results}
+
+    if require_support and gated["held_back"]:
+        print(f"\nSupport check held back {gated['held_back']} answer(s) that "
+              f"the material did not carry")
+        for why, n in sorted(gated["reasons"].items(), key=lambda kv: -kv[1]):
+            print(f"  {n:>4}  {why}")
+        print("  each became a refusal rather than reaching anybody")
 
     print(f"\nScore ({scorer}): {mean:.1%} over {len(results)} cases")
     for skill, s in per_skill.items():
         print(f"  {skill}: {s:.1%}")
+
+    # One number hides which way the model is wrong, and the two directions
+    # need completely different fixes. Measured on a real build, a closed
+    # book model scored 43% here while inventing an answer on every single
+    # row where the material held none. The single figure looked survivable
+    # and the breakdown did not.
+    if scorer == "refusal":
+        counts = refusal_breakdown(results)
+        report_extra = {"refusal_breakdown": counts}
+        report.update(report_extra)
+        asked = counts["should_decline"]
+        print()
+        print("  Of the cases where the material did NOT hold the answer")
+        if asked:
+            print(f"    declined correctly     {counts['declined']:>4} of "
+                  f"{asked}  ({counts['declined'] / asked:.0%})")
+            print(f"    INVENTED an answer     {counts['invented']:>4} of "
+                  f"{asked}  ({counts['invented'] / asked:.0%})")
+        else:
+            print("    none, so this run says nothing about declining. Make "
+                  "some with")
+            print("    `stratum ground --abstain-share`.")
+        answerable = counts["should_answer"]
+        print("  Of the cases where it DID hold the answer")
+        if answerable:
+            print(f"    answered               {counts['answered']:>4} of "
+                  f"{answerable}  ({counts['answered'] / answerable:.0%})")
+            print(f"    refused one it could   {counts['over_refused']:>4} of "
+                  f"{answerable}  ({counts['over_refused'] / answerable:.0%})")
+        else:
+            print("    none, so a model that declines everything would score "
+                  "full marks here.")
+        # Which way to turn the dial, decided by which failure is larger.
+        # Telling somebody to raise the abstention share while their real
+        # problem is a model that already refuses half of what it could
+        # answer makes the model worse and looks like advice.
+        worse = "invent" if counts["invented"] > counts["over_refused"] else \
+            ("refuse" if counts["over_refused"] > counts["invented"] else "both")
+        if counts["invented"] or counts["over_refused"]:
+            print()
+        if worse == "invent":
+            print(f"  Inventing is the larger failure, {counts['invented']} "
+                  f"against {counts['over_refused']} over refusals.")
+            print("  Raise --abstain-share and retrain. No access filter "
+                  "prevents inventing,")
+            print("  because the filter has already done its job by returning "
+                  "nothing.")
+            print("  `stratum serve --require-support` stops these reaching "
+                  "anybody meanwhile.")
+        elif worse == "refuse":
+            print(f"  Over refusing is the larger failure, "
+                  f"{counts['over_refused']} against {counts['invented']} "
+                  f"inventions.")
+            print("  LOWER --abstain-share and retrain. The model has learned "
+                  "to decline more")
+            print("  readily than the material warrants, and a model that "
+                  "will not answer")
+            print("  questions it can answer is not a safer one, it is an "
+                  "unused one.")
+        elif counts["invented"]:
+            print(f"  {counts['invented']} of each failure. The abstention "
+                  f"share is about right and")
+            print("  what is left needs more or better training pairs rather "
+                  "than a different dial.")
 
     if baseline:
         print(f"\nBaseline run: {baseline}")
