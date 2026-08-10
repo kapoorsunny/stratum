@@ -220,6 +220,214 @@ def corpus(tmp_path):
     return str(chunks), str(pairs)
 
 
+def test_the_kept_window_is_the_one_holding_the_answer(tmp_path):
+    """The bug that was teaching the model to invent.
+
+    Cutting a chunk at its first max_chars is the obvious thing to do. When
+    the answer sits past the cut, the row still claims to be answerable, so
+    the model is shown material without the answer and taught to produce one
+    anyway. Measured on a real build it hit 2 of 8 answerable rows, and every
+    one of those was a worked example of making something up.
+    """
+    from stratum.grounded import _window_for_answer
+
+    filler = "General background about pumps and their casings. " * 40
+    buried = "The certified bearing clearance on P-4471 is 0.418 mm."
+    text = filler + buried + " " + filler
+
+    kept = _window_for_answer(text, "The clearance is 0.418 mm", 600)
+    assert "0.418" in kept, "the window has to cover the answer"
+    assert len(kept) <= 600
+
+
+def test_a_short_chunk_is_kept_whole(tmp_path):
+    from stratum.grounded import _window_for_answer
+
+    text = "The clearance is 0.418 mm."
+    assert _window_for_answer(text, "0.418 mm", 1200) == text
+
+
+def test_a_row_whose_answer_is_nowhere_becomes_a_decline_row(tmp_path):
+    """The honest outcome when even the best window does not carry it.
+
+    Leaving the row alone would say an answer is available in material that
+    does not contain it, which is the exact lesson this file exists to avoid
+    teaching.
+    """
+    chunks = tmp_path / "chunks.jsonl"
+    write(chunks, [
+        {"id": "c1", "text": "Corporate governance is a system of rules.",
+         "source": "public/gov.txt", "compartment": "public"},
+        {"id": "c2", "text": "Business ethics concerns conduct at work.",
+         "source": "public/ethics.txt", "compartment": "public"},
+    ])
+    pairs = tmp_path / "pairs.jsonl"
+    write(pairs, [
+        {"prompt": "What is the bearing clearance of pump P-4471?",
+         "response": "The certified clearance is 0.418 millimetres measured "
+                     "at the coupling end of the shaft.",
+         "source_chunk": "c1", "source": "public/gov.txt"},
+    ])
+    out = tmp_path / "grounded.jsonl"
+    counts = ground_pairs(str(pairs), str(chunks), str(out), distractors=1,
+                          abstain_share=0.0, verbose=False)
+
+    assert counts["rescued"] == 1
+    rows = [json.loads(l) for l in open(out, encoding="utf-8")]
+    assert rows[0]["abstain"] is True
+    assert rows[0]["response"] == REFUSAL
+    assert rows[0]["unanswerable_after_trim"] is True
+
+
+def test_a_row_whose_answer_is_present_is_left_answerable(tmp_path):
+    """The other half. Rescuing everything would be a model that only
+    declines, which is the failure in the opposite direction."""
+    chunks = tmp_path / "chunks.jsonl"
+    write(chunks, [
+        {"id": "c1", "text": "The certified bearing clearance on pump P-4471 "
+                             "is 0.418 mm at the coupling end.",
+         "source": "eng/pumps.txt", "compartment": "engineering"},
+        {"id": "c2", "text": "Compressor K-201 is rated for 84 bar.",
+         "source": "eng/comp.txt", "compartment": "engineering"},
+    ])
+    pairs = tmp_path / "pairs.jsonl"
+    write(pairs, [
+        {"prompt": "What is the bearing clearance of pump P-4471?",
+         "response": "The certified bearing clearance is 0.418 mm at the "
+                     "coupling end.",
+         "source_chunk": "c1", "source": "eng/pumps.txt"},
+    ])
+    out = tmp_path / "grounded.jsonl"
+    counts = ground_pairs(str(pairs), str(chunks), str(out), distractors=1,
+                          abstain_share=0.0, verbose=False)
+
+    assert counts["rescued"] == 0
+    rows = [json.loads(l) for l in open(out, encoding="utf-8")]
+    assert rows[0]["abstain"] is False
+    assert "0.418" in rows[0]["prompt"]
+
+
+def test_every_answerable_row_can_actually_be_answered(corpus, tmp_path):
+    """The property that has to hold over a whole file.
+
+    A grounded set where any answerable row's material does not carry its
+    answer is a set that teaches invention, however good the rest of it is.
+    """
+    from stratum.grounded import _answer_is_present, is_refusal
+    from stratum.support import passages_from_prompt
+
+    chunks, pairs = corpus
+    out = tmp_path / "grounded.jsonl"
+    ground_pairs(pairs, chunks, str(out), distractors=2, abstain_share=0.0,
+                 verbose=False)
+
+    rows = [json.loads(l) for l in open(out, encoding="utf-8")]
+    answerable = [r for r in rows if not is_refusal(r["response"])]
+    assert answerable, "the fixture must produce some answerable rows"
+    for r in answerable:
+        assert _answer_is_present(r["response"], passages_from_prompt(r["prompt"])), \
+            f"an answerable row whose material lacks the answer: {r['prompt'][:80]}"
+
+
+def test_the_refusal_scorer_punishes_both_kinds_of_wrong():
+    """Inventing and over refusing are both failures, and both score zero.
+
+    Counting refusals alone would make a model that declines everything look
+    perfect, which is the easiest way to pass this test and the least useful
+    model to ship.
+    """
+    from stratum.evaluate import score_refusal
+
+    answer = "The clearance is 0.418 mm."
+
+    # Declined when it should have, and answered when it should have.
+    assert score_refusal(REFUSAL, REFUSAL) == 1.0
+    assert score_refusal(answer, answer) == 1.0
+
+    # Invented an answer where the material did not hold one. This is the
+    # failure found on a real build.
+    assert score_refusal("The limit is 1.5 to 2.0 times rated capacity.",
+                         REFUSAL) == 0.0
+
+    # Refused a question it had the material to answer, which is the cost of
+    # overdoing abstention and has to be visible.
+    assert score_refusal(REFUSAL, answer) == 0.0
+
+
+def test_the_refusal_scorer_accepts_a_paraphrased_decline():
+    """A model will not repeat the sentence word for word, and marking it
+    wrong for rewording would measure obedience rather than behaviour."""
+    from stratum.evaluate import score_refusal
+
+    assert score_refusal("The reference material provided does not contain "
+                         "the answer to that question.", REFUSAL) == 1.0
+    assert score_refusal("Sorry, the material does not contain the answer.",
+                         REFUSAL) == 1.0
+
+
+def test_a_test_set_can_be_grounded_too(corpus, tmp_path):
+    """Test rows keep their answer under 'expected' rather than 'response'.
+
+    Both have to work. Measuring a grounded model on a closed book test set
+    asks it questions shaped like nothing it was trained on, so the score
+    says nothing about the thing being investigated. Refusing to ground a
+    test set would leave no honest way to find out whether grounding helped.
+    """
+    chunks, _ = corpus
+    testset = tmp_path / "test.jsonl"
+    write(testset, [
+        {"prompt": "What is the bearing clearance of pump P-4471?",
+         "expected": "0.418 mm", "source_chunk": "e1",
+         "source": "engineering/pumps.txt"},
+    ])
+    out = tmp_path / "grounded-test.jsonl"
+    ground_pairs(str(testset), chunks, str(out), distractors=1,
+                 abstain_share=0.0, verbose=False)
+
+    rows = [json.loads(l) for l in open(out, encoding="utf-8")]
+    assert rows, "a test set must produce grounded rows"
+    for r in rows:
+        assert "expected" in r, "the key it came in under is the key it goes out under"
+        assert "response" not in r
+        assert "Pump P-4471" in r["prompt"]
+
+
+def test_a_row_with_neither_answer_key_is_refused(corpus, tmp_path):
+    chunks, _ = corpus
+    broken = tmp_path / "broken.jsonl"
+    write(broken, [{"prompt": "What is it?", "source_chunk": "e1",
+                    "source": "engineering/pumps.txt"}])
+    with pytest.raises(GroundedError, match="no 'response'"):
+        ground_pairs(str(broken), chunks, str(tmp_path / "o.jsonl"),
+                     verbose=False)
+
+
+def test_an_abstention_row_in_a_test_set_expects_the_refusal(corpus, tmp_path):
+    """This is the row that measures the whole point of grounding."""
+    chunks, _ = corpus
+    testset = tmp_path / "test.jsonl"
+    write(testset, [
+        {"prompt": "What is the bearing clearance of pump P-4471?",
+         "expected": "0.418 mm", "source_chunk": "e1",
+         "source": "engineering/pumps.txt"},
+        {"prompt": "What pressure is K-201 rated for?",
+         "expected": "84 bar", "source_chunk": "e2",
+         "source": "engineering/comp.txt"},
+    ])
+    out = tmp_path / "grounded-test.jsonl"
+    ground_pairs(str(testset), chunks, str(out), distractors=2,
+                 abstain_share=1.0, verbose=False)
+
+    rows = [json.loads(l) for l in open(out, encoding="utf-8")]
+    assert rows
+    for r in rows:
+        assert r["abstain"] is True
+        assert r["expected"] == REFUSAL
+        # The real answer must be nowhere in the prompt, or the row is not a
+        # test of declining, it is a test of copying.
+        assert "0.418" not in r["prompt"] or r["source_chunk"] != "e1"
+
+
 def test_grounding_puts_the_source_into_the_prompt(corpus, tmp_path):
     chunks, pairs = corpus
     out = tmp_path / "grounded.jsonl"
